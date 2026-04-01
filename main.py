@@ -22,8 +22,9 @@ logger = logging.getLogger(__name__)
 
 
 def _handle_email(email, memory_manager, drive_client):
-    """Process a new email: classify attachments and file to Drive."""
+    """Process a new email: check relevance, then classify attachments and file to Drive."""
     from agent_sdk.filer import classify_attachment
+    from gmail.relevance import is_worth_filing
     from memory.schema import MemoryCategory, MemoryConfidence, MemoryRecord, MemorySource
 
     logger.info(
@@ -32,6 +33,13 @@ def _handle_email(email, memory_manager, drive_client):
         email.subject,
         len(email.attachments),
     )
+
+    should_file, reason = is_worth_filing(email)
+    if not should_file:
+        logger.info("Skipping email (not worth filing): %s — %s", email.subject, reason)
+        return
+
+    logger.info("Filing email: %s — %s", email.subject, reason)
 
     for attachment in email.attachments:
         try:

@@ -13,6 +13,7 @@ Jarvis monitors your Gmail inbox, analyses emails and attachments, organises doc
 | **Conversational AI** | Hand-rolled Claude agent loop with tool use |
 | **Persistent Memory** | SQLite (structured) + ChromaDB (semantic search) — remembers facts, preferences, decisions, documents |
 | **Gmail Monitoring** | Polls inbox every 5 min, parses emails + attachments (PDF, DOCX, images) |
+| **Email Relevance Filter** | Claude evaluates each email and skips newsletters, OTPs, and notifications — only real documents get filed |
 | **Smart Document Filing** | Claude classifies each attachment and files it to the right Google Drive folder automatically |
 | **Telegram Interface** | Secure single-user bot with commands for memory management |
 
@@ -30,7 +31,10 @@ Telegram Message
 Gmail Watcher (background)
       │
       ▼
- EmailParser ──► AttachmentClassifier (Claude) ──► DriveClient ──► MemoryManager
+ EmailParser ──► RelevanceFilter (Claude) ──► AttachmentClassifier (Claude) ──► DriveClient ──► MemoryManager
+                        │
+                   skip (newsletters,
+                   OTPs, notifications)
 ```
 
 **Five subsystems:**
@@ -38,7 +42,7 @@ Gmail Watcher (background)
 - **Agent Loop** (`core/agent.py`) — orchestrates all reasoning, tool calls, and responses via the Anthropic SDK
 - **Memory Manager** (`memory/`) — SQLite source of truth + ChromaDB vector index; deduplicates by topic with a full audit trail
 - **Telegram Bot** (`telegram/bot.py`) — long-polling bot; single allowed user ID; handles file uploads
-- **Gmail Watcher** (`gmail/`) — polls unread mail, extracts text from attachments, triggers the filing pipeline
+- **Gmail Watcher** (`gmail/`) — polls unread mail, filters by relevance, extracts text from attachments, triggers the filing pipeline
 - **Drive Filer** (`storage/` + `agent_sdk/filer.py`) — Claude classifies each file and places it in the right folder
 
 ---
@@ -82,6 +86,29 @@ Jarvis/
 ```
 
 Files are named `YYYY-MM_description.ext` for chronological sorting.
+
+---
+
+## Email Relevance Filtering
+
+Not every email triggers a filing action. Before any attachment is processed, Claude evaluates the email and decides whether it's worth storing.
+
+**Filed:**
+- Contracts, agreements, legal documents
+- Invoices, receipts, payment confirmations
+- Insurance documents or policies
+- Travel bookings, tickets, itineraries
+- Official correspondence (government, tax, bank, employer)
+- Health records, prescriptions, medical documents
+- Certificates, credentials, licences
+
+**Skipped:**
+- Newsletters and marketing emails
+- OTPs, verification codes, security alerts
+- Social notifications (likes, follows, comments)
+- Automated system notifications and status updates
+
+If the relevance check fails for any reason, Jarvis defaults to **filing the email** rather than silently losing a document.
 
 ---
 
@@ -161,6 +188,7 @@ jarvis/
 │   └── filer.py              # Claude-powered attachment classifier
 ├── gmail/
 │   ├── parser.py             # Email + attachment parsing
+│   ├── relevance.py          # Claude-powered email relevance filter
 │   └── watcher.py            # Gmail polling loop
 └── telegram/
     └── bot.py                # Telegram bot handler
