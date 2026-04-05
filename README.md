@@ -23,29 +23,31 @@ Local docs: [docs/index.html](./docs/index.html) or, when the dashboard is runni
 
 ## Architecture
 
+Interactive architecture docs: [docs/index.html](./docs/index.html) or [http://127.0.0.1:8080/docs](http://127.0.0.1:8080/docs).
+
 ```
-Telegram Message
-      │
-      ▼
- Marvis agent  ──── tools ────► MemoryManager (SQLite + ChromaDB)
-      │                   └──► DriveClient (Google Drive)
-      │
-Gmail Watcher (background)
-      │
-      ▼
- EmailParser ──► RelevanceFilter (Claude via OpenRouter) ──► AttachmentClassifier (Claude via OpenRouter) ──► DriveClient ──► MemoryManager
-                        │
-                   skip (newsletters,
-                   OTPs, notifications)
+Telegram chat
+  -> Chat Agent (JarvisAgent)
+  -> local tools and managers
+  -> SQLite + ChromaDB / Google Drive / Google Calendar
+  -> Telegram reply
+
+Telegram upload or Gmail filing
+  -> parser and extraction
+  -> Relevance Agent (Gmail only)
+  -> Classification Agent
+  -> Google Drive + local memory
+  -> optional Financial Agent
+  -> filing confirmation or watcher activity update
 ```
 
-**Five subsystems:**
+Runtime note: only `JarvisAgent` is a long-lived runtime object. The Relevance, Classification, Vision, and Financial agents are specialized LLM-driven stages documented as agents to make the hand-offs easier to follow.
 
-- **Agent Loop** (`core/agent.py`) — orchestrates all reasoning, tool calls, and responses via the Anthropic Messages format routed through OpenRouter
-- **Memory Manager** (`memory/`) — SQLite source of truth + ChromaDB vector index; deduplicates by topic with a full audit trail
-- **Telegram Bot** (`telegram_bot/bot.py`) — long-polling bot; single allowed user ID; handles file uploads
-- **Gmail Watcher** (`gmail/`) — polls unread mail, filters by relevance, extracts text from attachments, triggers the filing pipeline
-- **Drive Filer** (`storage/` + `agent_sdk/filer.py`) — the configured model classifies each file and places it in the right folder
+- **Chat Agent** (`core/agent.py`) — runs the Anthropic-format tool loop over OpenRouter and assembles the final reply
+- **Relevance Agent** (`gmail/relevance.py`) — decides whether a Gmail message is worth filing before the document pipeline continues
+- **Classification Agent** (`agent_sdk/filer.py`) — chooses the Drive path, filename, and summary for uploads and email attachments
+- **Vision Agent** (`utils/text_extraction.py`) — describes image-heavy documents when plain extraction is not enough
+- **Financial Agent** (`utils/financial_extraction.py`) — extracts vendor, amount, category, and date for finance-oriented documents
 
 ---
 
