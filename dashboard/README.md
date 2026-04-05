@@ -23,7 +23,7 @@ Tabs:
 - `/?tab=overview` for app status, Gmail activity, and recent operational events
 - `/?tab=memory` for active Marvis memories
 - `/?tab=drive` for a read-only listing of files under the managed Google Drive root, including clickable links
-- `/?tab=llmops` for token usage, estimated costs, inline SVG charts, latency, retention policy, heartbeat freshness, issue breakdowns, and recent audit events
+- `/?tab=llmops` for token usage, estimated costs, inline SVG charts, latency, retention policy, heartbeat freshness, issue breakdowns, and recent audit events such as note writes, uploads, and calendar mutations
 
 The dashboard now switches tabs client-side without reloading the whole page.
 

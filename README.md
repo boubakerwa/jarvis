@@ -60,13 +60,14 @@ flowchart LR
   subgraph User["User Surfaces"]
     TG["Telegram chat"]
     UP["Telegram uploads"]
-    DB["Local dashboard"]
+    DASH["Dashboard + docs"]
   end
 
   subgraph Core["Marvis Core"]
     AG["Chat Agent"]
     MEM["Memory Manager<br/>SQLite + ChromaDB"]
-    TOOLS["Local tools and managers"]
+    NOTES["Notes Manager<br/>Obsidian tools"]
+    OPS["LLMOps + ops logging"]
     ROUTER["OpenRouter<br/>Anthropic-style Messages API"]
   end
 
@@ -83,14 +84,27 @@ flowchart LR
     CAL["Google Calendar"]
   end
 
+  subgraph Workspace["Shared Workspace"]
+    OBS["Obsidian vault"]
+  end
+
+  subgraph Telemetry["Local Telemetry"]
+    LLMLOG["data/llm_activity.jsonl"]
+    OPSLOG["data/ops_activity.jsonl<br/>data/ops_issues.jsonl<br/>data/ops_audit.jsonl"]
+  end
+
   TG --> AG
   AG --> ROUTER
   ROUTER --> AG
-  AG --> TOOLS
-  TOOLS --> MEM
-  TOOLS --> DRIVE
-  TOOLS --> CAL
+  ROUTER --> LLMLOG
+  AG --> MEM
+  AG --> NOTES
+  AG --> DRIVE
+  AG --> CAL
+  AG --> OPS
   MEM --> AG
+  NOTES --> AG
+  NOTES --> OBS
 
   UP --> PARSE
   GW --> PARSE
@@ -100,9 +114,14 @@ flowchart LR
   CLS --> MEM
   PARSE --> FIN
   FIN --> MEM
+  GW --> OPS
+  OPS --> OPSLOG
 
-  DB --> MEM
-  DB --> DRIVE
+  DASH --> MEM
+  DASH --> DRIVE
+  DASH --> OBS
+  DASH --> LLMLOG
+  DASH --> OPSLOG
 ```
 
 Interactive architecture docs live in [docs/index.html](./docs/index.html) and on the dashboard route [http://127.0.0.1:8080/docs](http://127.0.0.1:8080/docs).
@@ -110,6 +129,9 @@ Interactive architecture docs live in [docs/index.html](./docs/index.html) and o
 ### Runtime Roles
 
 - **Chat Agent** (`core/agent.py`) handles the Anthropic-format tool loop and assembles final replies.
+- **Notes Manager** (`notes/service.py`) writes and appends collaborative Markdown notes in the shared Obsidian vault.
+- **LLMOps recorder** (`core/llmops.py`) captures per-call latency, token usage, and estimated model cost in local JSONL.
+- **Ops logger** (`core/opslog.py`) records heartbeats, issues, and audit events for note writes, Drive uploads, and other mutations.
 - **Relevance Agent** (`gmail/relevance.py`) decides whether a Gmail message is worth filing.
 - **Classification Agent** (`agent_sdk/filer.py`) picks the Drive path, filename, and summary for attachments and uploads.
 - **Vision Agent** (`utils/text_extraction.py`) describes image-heavy documents when plain extraction is not enough.
@@ -126,6 +148,7 @@ Marvis hardens the risky parts of agent behavior with deterministic code:
 - Gmail backfills are bounded by a configured cutoff date
 - document filing prefers preserving useful documents over silently dropping them
 - memory is externalized into structured records instead of hidden in conversation state
+- model calls and side-effectful operations are logged into retention-aware JSONL streams for dashboard and `/llmops` inspection
 
 This turned out to matter more than prompt polish. The biggest failures in agent systems are usually plausible outputs that are just wrong enough to cause trouble.
 
@@ -141,6 +164,7 @@ This turned out to matter more than prompt polish. The biggest failures in agent
 | Financial extraction | Pulls vendor, amount, date, and category from finance-oriented documents |
 | Telegram bot | Single-user bot with slash commands, uploads, and long-polling deployment |
 | Obsidian integration | Writes collaborative Markdown notes into a configurable vault path |
+| LLMOps and ops audit | Tracks token usage, estimated cost, heartbeats, warnings, errors, and mutation audit events in local JSONL |
 | Dashboard | Overview, memory browser, Drive mirror, LLMOps telemetry, activity log, and interactive docs |
 | Article-ready docs | Includes a Medium draft that explains the architecture and tradeoffs |
 
@@ -318,7 +342,9 @@ jarvis/
 |  `- settings.py
 |- core/
 |  |- agent.py
+|  |- llmops.py
 |  |- llm_client.py
+|  |- opslog.py
 |  |- prompts.py
 |  |- structured_output.py
 |  `- time_utils.py
@@ -334,6 +360,9 @@ jarvis/
 |- storage/
 |  |- drive.py
 |  `- schema.py
+|- notes/
+|  |- obsidian.py
+|  `- service.py
 |- agent_sdk/
 |  `- filer.py
 |- utils/
@@ -361,6 +390,8 @@ The branch includes automated coverage for:
 - structured output validation
 - date resolution and calendar safety
 - Gmail watcher cutoff behavior
+- note workspace creation, append, and search behavior
+- LLMOps telemetry summaries and ops audit logging
 - dashboard rendering and client-side interactions
 - Telegram command publishing
 

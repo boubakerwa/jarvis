@@ -1,6 +1,6 @@
 # Building Marvis: A Local AI Assistant With Claude-Style Agentic Infrastructure
 
-*What it looks like to build a personal assistant that does real work across Telegram, Gmail, Google Drive, memory, and calendar tools, without turning the whole system into prompt soup.*
+*What it looks like to build a personal assistant that does real work across Telegram, Gmail, Google Drive, shared notes, memory, calendar tools, and operator telemetry, without turning the whole system into prompt soup.*
 
 Repo: [github.com/boubakerwa/jarvis](https://github.com/boubakerwa/jarvis)
 
@@ -8,7 +8,7 @@ Most personal AI assistants look impressive right up until you ask them to touch
 
 Chat is easy. Trust is hard.
 
-That was the starting point for **Marvis**: a local assistant that runs on a Mac Mini, talks to me through Telegram, watches Gmail for useful documents, files them into Google Drive, remembers the things that matter, and can create tasks and calendar events without pretending the model should own the whole world.
+That was the starting point for **Marvis**: a local assistant that runs on a Mac Mini, talks to me through Telegram, watches Gmail for useful documents, files them into Google Drive, remembers the things that matter, writes into a shared Obsidian notes workspace, and can create tasks and calendar events without pretending the model should own the whole world.
 
 The interesting part of Marvis is not that it "uses AI." The interesting part is that it is built around a clean, Claude-shaped agent loop with deterministic boundaries around everything that can go wrong.
 
@@ -20,9 +20,10 @@ In day-to-day use, Marvis behaves like a compact personal ops layer:
 
 - I can message it on Telegram and ask it questions about my projects, habits, documents, or schedule.
 - It stores durable memory in a structured way instead of hiding everything inside chat history.
+- It can create and extend collaborative notes in Obsidian without replacing local structured memory as the source of truth.
 - It watches Gmail, filters out noise, and files meaningful attachments into a fixed Drive structure.
 - It can create tasks and calendar events.
-- It exposes a small local dashboard so I can inspect memory, Drive files, and activity logs.
+- It exposes a small local dashboard so I can inspect memory, Drive files, LLMOps telemetry, and mutation audit logs.
 
 That mix matters. It means the system is not just a chatbot with a few demo tools. It is a real agentic application with both foreground interactions and background workflows.
 
@@ -42,7 +43,7 @@ In Marvis, that loop is currently routed through OpenRouter's Anthropic-compatib
 
 That distinction is worth being explicit about. The app is not built around a generic "LLM abstraction" that hides everything. It is built around a Claude-native interaction pattern, and that has been a feature, not a limitation.
 
-![Placeholder for an editorial-quality architecture diagram of Marvis. Show a Telegram user entering through a Telegram Bot into a Marvis Agent Loop. Above the agent loop, show Prompt Builder and Memory Retrieval pulling from SQLite and ChromaDB. Below the loop, show tool branches to Calendar, Tasks, Drive search, and memory writes. On the right, show OpenRouter as the transport layer serving Anthropic-style Messages requests, with Claude Sonnet as the default model and optional Gemma routing only for lower-risk tasks like relevance and financial extraction. Underneath, show a Gmail watcher pipeline that parses unread emails, runs relevance filtering, classifies attachments, uploads files to Google Drive, and creates memory records. At the bottom, show a local dashboard reading memories, Drive files, and activity logs. Style should be elegant, publication-ready, technical, and easy to scan, with labeled arrows and a local-first feel.](TODO-marvis-overview-diagram.png)
+![Placeholder for an editorial-quality architecture diagram of Marvis. Show a Telegram user entering through a Telegram Bot into a Marvis Agent Loop. Above the agent loop, show Prompt Builder and Memory Retrieval pulling from SQLite and ChromaDB. Below the loop, show tool branches to Calendar, Tasks, Drive search, shared Obsidian notes, and memory writes. On the right, show OpenRouter as the transport layer serving Anthropic-style Messages requests, with Claude Sonnet as the default model and optional Gemma routing only for lower-risk tasks like relevance and financial extraction. Also show LLMOps and ops audit streams writing to local JSONL files. Underneath, show a Gmail watcher pipeline that parses unread emails, runs relevance filtering, classifies attachments, uploads files to Google Drive, and creates memory records. At the bottom, show a local dashboard reading memories, Drive files, note audit events, and LLMOps telemetry. Style should be elegant, publication-ready, technical, and easy to scan, with labeled arrows and a local-first feel.](TODO-marvis-overview-diagram.png)
 
 ## Why This Matters For Agentic Systems
 
@@ -55,6 +56,7 @@ In Marvis, the model is responsible for interpretation, planning, and selecting 
 - authentication and API calls
 - storage and folder structure
 - memory persistence
+- collaborative note storage
 - schema validation
 - time resolution
 - Gmail polling rules
@@ -74,6 +76,8 @@ What I like most about this design is that memory stays inspectable. I can open 
 
 This small choice changes the product feel. The assistant becomes easier to trust because it is easier to audit.
 
+The shared notes layer fits around that design rather than replacing it. Marvis can create or extend human-readable Markdown notes in Obsidian, but the structured memory layer still owns the durable facts it should reason over. That makes collaboration easier without turning a note vault into the only database in the system.
+
 ## Gmail Filing Turned Out To Be The Best Agent Workflow
 
 The background Gmail pipeline is where Marvis stopped feeling like a chat app and started feeling like a real system.
@@ -86,7 +90,7 @@ But it also revealed an important lesson. Agentic workflows are not just about w
 
 If relevance filtering fails, Marvis prefers filing over silent loss. If structured JSON comes back malformed or semantically off, the app validates it before accepting it. If a task is lower-risk, it can eventually use a cheaper or more experimental model. If it is critical, it stays on the safer path.
 
-![Placeholder for a polished systems diagram focused on Marvis Gmail processing. Show unread Gmail messages entering a cutoff-date filter, then Email Parser, then Relevance Filter, then branching into skip or file. The file path should continue through attachment extraction, text extraction for PDFs, DOCX, and images, attachment classification, optional financial extraction, Google Drive upload into a fixed personal folder tree, and memory record creation with document references. Include callouts that structured outputs are validated after parsing, Claude is the default model, and lower-risk subtasks can be routed differently. The visual should feel like a real engineering diagram for a production workflow, not a toy flowchart.](TODO-marvis-gmail-pipeline-diagram.png)
+![Placeholder for a polished systems diagram focused on Marvis Gmail processing. Show unread Gmail messages entering a cutoff-date filter, then Email Parser, then Relevance Filter, then branching into skip or file. The file path should continue through attachment extraction, text extraction for PDFs, DOCX, and images, attachment classification, optional financial extraction, Google Drive upload into a fixed personal folder tree, and memory record creation with document references. Add small sidecar callouts showing LLMOps telemetry and ops issue logging for the watcher path. Include callouts that structured outputs are validated after parsing, Claude is the default model, and lower-risk subtasks can be routed differently. The visual should feel like a real engineering diagram for a production workflow, not a toy flowchart.](TODO-marvis-gmail-pipeline-diagram.png)
 
 ## The Most Important Fix Wasn’t A Better Prompt
 
@@ -116,8 +120,10 @@ Marvis reinforced a few things for me:
 
 - Native tool semantics are worth leaning into.
 - Memory should be external, structured, and inspectable.
+- Shared notes work best as a collaboration surface, not as the only source of truth.
 - Structured outputs should always be validated before they can trigger side effects.
 - A dashboard is not a vanity feature. It is part of the safety model.
+- Lightweight LLMOps and audit logging make a local agent much easier to debug once it starts touching real systems.
 - Deterministic code should own dates, storage, and irreversible actions.
 
 This is also why routing through OpenRouter did not change the architectural story. The transport can move, but the contract stays the same. If I swapped the endpoint back to Anthropic directly, the design would still hold because the app is already organized around Claude-shaped concepts.
@@ -149,9 +155,12 @@ If you want to explore the project, these are the best places to start:
 - Local docs: `docs/index.html`
 - Agent loop: `core/agent.py`
 - Shared LLM client: `core/llm_client.py`
+- LLMOps telemetry: `core/llmops.py`
+- Ops audit logging: `core/opslog.py`
 - Prompt construction: `core/prompts.py`
 - Deterministic time handling: `core/time_utils.py`
 - Gmail pipeline: `gmail/watcher.py`, `gmail/relevance.py`, `agent_sdk/filer.py`
+- Notes workspace: `notes/service.py`, `notes/obsidian.py`
 - Dashboard: `dashboard/app.py`
 
 Marvis is still a personal system, but that is exactly why it is useful as a reference. It touches real tools, accumulates real state, and exposes the engineering choices that matter once an agent stops being a toy.
