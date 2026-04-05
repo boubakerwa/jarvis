@@ -57,6 +57,51 @@ class NotesServiceTests(unittest.TestCase):
             self.assertIn("## Next step", content)
             self.assertIn("Ship the first prototype.", content)
 
+    def test_update_note_can_replace_exact_text(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = NotesManager(ObsidianVault(tmpdir))
+            created = manager.create_note(
+                title="Project alpha",
+                body="# Project alpha\n\nStatus: Draft",
+                folder="Projects",
+            )
+
+            result = manager.update_note(
+                created["path"],
+                find_text="Status: Draft",
+                replace_with="Status: Ready",
+            )
+
+            note_path = Path(tmpdir) / created["path"]
+            content = note_path.read_text(encoding="utf-8")
+            self.assertEqual(result["mode"], "replace_text")
+            self.assertIn("Status: Ready", content)
+            self.assertNotIn("Status: Draft", content)
+
+    def test_update_note_can_replace_full_content_and_keep_frontmatter(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = NotesManager(ObsidianVault(tmpdir))
+            created = manager.create_note(
+                title="Project alpha",
+                body="# Project alpha\n\nOld body",
+                folder="Projects",
+                tags=["active"],
+                note_type="project",
+            )
+
+            result = manager.update_note(
+                created["path"],
+                content="# Project alpha\n\nNew body",
+            )
+
+            note_path = Path(tmpdir) / created["path"]
+            content = note_path.read_text(encoding="utf-8")
+            self.assertEqual(result["mode"], "replace_content")
+            self.assertIn('type: "project"', content)
+            self.assertIn('tags: ["active"]', content)
+            self.assertIn("New body", content)
+            self.assertNotIn("Old body", content)
+
     def test_search_notes_matches_filename_and_content(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = NotesManager(ObsidianVault(tmpdir))

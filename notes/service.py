@@ -59,6 +59,62 @@ class NotesManager:
         )
         return {"path": note["path"]}
 
+    def update_note(
+        self,
+        path: str,
+        *,
+        content: str | None = None,
+        find_text: str | None = None,
+        replace_with: str | None = None,
+        replace_all: bool = False,
+        preserve_frontmatter: bool = True,
+    ) -> dict:
+        if content is not None and (find_text is not None or replace_with is not None):
+            raise ValueError("Choose either full note replacement or exact text replacement, not both.")
+
+        if content is not None:
+            if not content.strip():
+                raise ValueError("Updated note content cannot be empty.")
+            note = self._vault.replace_note(
+                path,
+                content.strip(),
+                preserve_frontmatter=preserve_frontmatter,
+            )
+            record_audit(
+                event="note_updated",
+                component="notes",
+                summary="Replaced note content",
+                metadata={"path": note["path"], "mode": "replace_content"},
+            )
+            return {"path": note["path"], "mode": "replace_content"}
+
+        if not find_text:
+            raise ValueError("find_text is required when replacing text within a note.")
+        if replace_with is None:
+            raise ValueError("replace_with is required when replacing text within a note.")
+
+        note = self._vault.replace_text_in_note(
+            path,
+            find_text,
+            replace_with,
+            replace_all=replace_all,
+        )
+        record_audit(
+            event="note_updated",
+            component="notes",
+            summary="Updated note text",
+            metadata={
+                "path": note["path"],
+                "mode": "replace_text",
+                "replacement_count": note["replacement_count"],
+            },
+        )
+        return {
+            "path": note["path"],
+            "mode": "replace_text",
+            "replacement_count": note["replacement_count"],
+        }
+
     def search_notes(self, query: str, folder: str | None = None, limit: int = 5) -> list[dict]:
         return self._vault.search_notes(query, folder=folder, limit=limit)
 

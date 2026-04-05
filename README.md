@@ -129,7 +129,7 @@ Interactive architecture docs live in [docs/index.html](./docs/index.html) and o
 ### Runtime Roles
 
 - **Chat Agent** (`core/agent.py`) handles the Anthropic-format tool loop and assembles final replies.
-- **Notes Manager** (`notes/service.py`) writes and appends collaborative Markdown notes in the shared Obsidian vault.
+- **Notes Manager** (`notes/service.py`) creates, updates, and appends collaborative Markdown notes in the shared Obsidian vault.
 - **LLMOps recorder** (`core/llmops.py`) captures per-call latency, token usage, and estimated model cost in local JSONL.
 - **Ops logger** (`core/opslog.py`) records heartbeats, issues, and audit events for note writes, Drive uploads, and other mutations.
 - **Relevance Agent** (`gmail/relevance.py`) decides whether a Gmail message is worth filing.
@@ -163,7 +163,7 @@ This turned out to matter more than prompt polish. The biggest failures in agent
 | Smart filing | Classifies documents and uploads them into a structured Google Drive library |
 | Financial extraction | Pulls vendor, amount, date, and category from finance-oriented documents |
 | Telegram bot | Single-user bot with slash commands, uploads, and long-polling deployment |
-| Obsidian integration | Writes collaborative Markdown notes into a configurable vault path |
+| Obsidian integration | Creates and updates collaborative Markdown notes in a configurable vault path |
 | LLMOps and ops audit | Tracks token usage, estimated cost, heartbeats, warnings, errors, and mutation audit events in local JSONL |
 | Dashboard | Overview, memory browser, Drive mirror, LLMOps telemetry, activity log, and interactive docs |
 | Article-ready docs | Includes a Medium draft that explains the architecture and tradeoffs |
@@ -262,9 +262,9 @@ Before each model call, the top relevant memories are retrieved from ChromaDB an
 
 ## Obsidian Notes
 
-If you set `OBSIDIAN_VAULT_PATH`, Marvis writes into that vault as a shared notes workspace. Set `OBSIDIAN_ROOT_FOLDER=.` if you want it to write directly at the vault root, or set a folder name if you want everything grouped under a subfolder. This works especially well with iCloud on Apple devices because Marvis only writes plain Markdown files.
+If you set `OBSIDIAN_VAULT_PATH`, Marvis writes into that vault as a shared notes workspace. Set `OBSIDIAN_ROOT_FOLDER=.` if you want it to write directly at the vault root, or set a folder name if you want everything grouped under a subfolder. Marvis can create new notes, append to them, and revise existing note content while still writing plain Markdown files. This works especially well with iCloud on Apple devices.
 
-Marvis is not locked into a preset folder taxonomy. The agent can choose the note title, folder, and structure that best fit the request, then reuse or extend existing notes through search and append operations.
+Marvis is not locked into a preset folder taxonomy. The agent can choose the note title, folder, and structure that best fit the request, then reuse or revise existing notes through search, update, and append operations.
 
 Once enabled, you can ask things like:
 

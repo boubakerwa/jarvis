@@ -75,6 +75,56 @@ class ObsidianVault:
         path.write_text(existing + suffix + "\n", encoding="utf-8")
         return self._note_payload(path)
 
+    def replace_note(
+        self,
+        display_path: str,
+        content: str,
+        *,
+        preserve_frontmatter: bool = True,
+    ) -> dict:
+        path = self._resolve_path(display_path)
+        if not path.exists():
+            raise FileNotFoundError(display_path)
+
+        existing = path.read_text(encoding="utf-8")
+        updated = self._normalize_note_text(content)
+
+        if preserve_frontmatter:
+            existing_frontmatter, _ = self._split_frontmatter(existing)
+            incoming_frontmatter, _ = self._split_frontmatter(updated)
+            if existing_frontmatter and not incoming_frontmatter:
+                updated = existing_frontmatter + updated.lstrip("\n")
+
+        path.write_text(updated, encoding="utf-8")
+        return self._note_payload(path)
+
+    def replace_text_in_note(
+        self,
+        display_path: str,
+        find_text: str,
+        replace_with: str,
+        *,
+        replace_all: bool = False,
+    ) -> dict:
+        path = self._resolve_path(display_path)
+        if not path.exists():
+            raise FileNotFoundError(display_path)
+
+        existing = path.read_text(encoding="utf-8")
+        match_count = existing.count(find_text)
+        if match_count == 0:
+            raise ValueError("Could not find the requested text in the note.")
+        if match_count > 1 and not replace_all:
+            raise ValueError(
+                "The requested text appears multiple times. Use replace_all or provide a more specific match."
+            )
+
+        updated = existing.replace(find_text, replace_with, -1 if replace_all else 1)
+        path.write_text(self._normalize_note_text(updated), encoding="utf-8")
+        payload = self._note_payload(path)
+        payload["replacement_count"] = match_count if replace_all else 1
+        return payload
+
     def read_note(self, display_path: str, max_chars: int = 8000) -> dict:
         path = self._resolve_path(display_path)
         text = path.read_text(encoding="utf-8")
@@ -204,6 +254,18 @@ class ObsidianVault:
                     excerpt += "..."
                 return excerpt
         return compact[:max_chars] + ("..." if len(compact) > max_chars else "")
+
+    def _split_frontmatter(self, text: str) -> tuple[str, str]:
+        normalized = text.replace("\r\n", "\n")
+        match = re.match(r"\A---\n.*?\n---(?:\n|$)", normalized, re.DOTALL)
+        if not match:
+            return "", normalized
+        frontmatter = match.group(0).rstrip("\n") + "\n\n"
+        body = normalized[match.end():].lstrip("\n")
+        return frontmatter, body
+
+    def _normalize_note_text(self, text: str) -> str:
+        return text.rstrip() + "\n"
 
     def _clean_relative_path(self, value: str) -> str:
         cleaned = value.strip().replace("\\", "/").strip("/")
