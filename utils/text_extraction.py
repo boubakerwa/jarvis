@@ -5,7 +5,10 @@ Used by gmail/parser.py, telegram_bot/bot.py, agent_sdk/filer.py, and core/agent
 import base64
 import io
 import logging
+from datetime import datetime, timezone
+from time import monotonic
 
+from core.llmops import record_llm_call
 from core.llm_client import create_llm_client, get_model_name
 from core.structured_output import response_text
 
@@ -83,8 +86,11 @@ def describe_image(image_data: bytes, mime_type: str) -> str:
     try:
         b64 = base64.standard_b64encode(image_data).decode("utf-8")
         client = create_llm_client()
+        model_name = get_model_name("vision")
+        started_at = datetime.now(timezone.utc).isoformat()
+        started_clock = monotonic()
         response = client.messages.create(
-            model=get_model_name("vision"),
+            model=model_name,
             max_tokens=1024,
             messages=[
                 {
@@ -110,7 +116,26 @@ def describe_image(image_data: bytes, mime_type: str) -> str:
                 }
             ],
         )
+        record_llm_call(
+            task="vision",
+            model=model_name,
+            status="ok",
+            started_at=started_at,
+            latency_ms=(monotonic() - started_clock) * 1000,
+            response=response,
+            metadata={"channel": "vision", "mime_type": mime_type},
+        )
         return response_text(response)[:4000]
     except Exception as e:
+        model_name = locals().get("model_name") or get_model_name("vision")
+        record_llm_call(
+            task="vision",
+            model=model_name,
+            status="api_error",
+            started_at=locals().get("started_at"),
+            latency_ms=(monotonic() - locals().get("started_clock", monotonic())) * 1000,
+            error=str(e),
+            metadata={"channel": "vision", "mime_type": mime_type},
+        )
         logger.warning("Image description failed: %s", e)
         return ""

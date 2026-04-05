@@ -48,7 +48,7 @@ That gives you an assistant that can actually do useful local work:
 | Google Drive filing | classifies uploads and attachments into a fixed folder structure with predictable names |
 | Memory | stores durable facts, preferences, decisions, and document references in SQLite plus ChromaDB |
 | Obsidian notes | writes collaborative Markdown notes into a shared vault with Marvis-chosen organization |
-| Dashboard | shows overview, memory, Drive files, activity, and interactive docs |
+| Dashboard | shows overview, memory, Drive files, LLMOps telemetry, activity, and interactive docs |
 | Docs | ships with local architecture docs plus a Medium-ready article draft |
 
 ## Architecture
@@ -141,7 +141,7 @@ This turned out to matter more than prompt polish. The biggest failures in agent
 | Financial extraction | Pulls vendor, amount, date, and category from finance-oriented documents |
 | Telegram bot | Single-user bot with slash commands, uploads, and long-polling deployment |
 | Obsidian integration | Writes collaborative Markdown notes into a configurable vault path |
-| Dashboard | Overview, memory browser, Drive mirror, activity log, and interactive docs |
+| Dashboard | Overview, memory browser, Drive mirror, LLMOps telemetry, activity log, and interactive docs |
 | Article-ready docs | Includes a Medium draft that explains the architecture and tradeoffs |
 
 ## Quick Start
@@ -214,6 +214,7 @@ Open [http://127.0.0.1:8080](http://127.0.0.1:8080).
 |---|---|
 | Any message | Goes through the chat agent |
 | `/status` | Shows memory count, Drive status, and configured model |
+| `/llmops` | Shows recent token usage, estimated LLM cost, latency, top LLM tasks, and short-horizon ops health |
 | `/memories` | Lists stored memories grouped by category |
 | `/forget <topic>` | Deletes a memory by topic |
 | `/reset` | Clears in-session chat history while preserving long-term memory |
@@ -281,7 +282,15 @@ The local dashboard gives Marvis an operator surface instead of a black box:
 - **Overview** for system status and recent activity
 - **Memory** to inspect what Marvis currently retains about you
 - **Drive** to mirror the Google Drive files Marvis can see
+- **LLMOps** for token usage, estimated model cost, inline charts, heartbeat freshness, issue breakdowns, and recent audit events
 - **Docs** for architecture walkthroughs and setup help
+
+Observability data now uses retention-aware JSONL streams:
+
+- `data/llm_activity.jsonl` for model call telemetry
+- `data/ops_activity.jsonl` for positive activity and heartbeats, retained for 5 minutes
+- `data/ops_issues.jsonl` for warnings and errors, retained for 3 days
+- `data/ops_audit.jsonl` for low-volume mutation events such as task creation, note writes, uploads, and calendar writes
 
 It also ships with:
 

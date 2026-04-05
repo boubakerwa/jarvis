@@ -1,11 +1,14 @@
+from __future__ import annotations
+
 """
 Telegram bot handler. Routes messages to the Marvis agent loop.
 Only processes messages from TELEGRAM_ALLOWED_USER_ID.
 """
-import os
+import json
 import logging
-import mimetypes
-import tempfile
+from collections import defaultdict
+from datetime import datetime, timezone
+from typing import Any
 
 from telegram import BotCommand, BotCommandScopeChat, Document, PhotoSize, Update
 from telegram.ext import (
@@ -17,6 +20,19 @@ from telegram.ext import (
 )
 
 from config import settings
+from core.llmops import LLM_ACTIVITY_PATH
+from core.opslog import (
+    HEARTBEAT_INTERVAL_SECONDS,
+    OPS_ACTIVITY_PATH,
+    OPS_AUDIT_PATH,
+    OPS_ISSUES_PATH,
+    new_op_id,
+    operation_context,
+    read_jsonl,
+    record_activity,
+    record_audit,
+    record_issue,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +54,7 @@ class TelegramBot:
 
     def run(self) -> None:
         logger.info("Telegram bot starting (long-poll mode)")
+        record_activity(event="telegram_bot_starting", component="telegram", summary="Telegram bot entering polling mode")
         self._app.run_polling()
 
     # ------------------------------------------------------------------
@@ -51,6 +68,7 @@ class TelegramBot:
         self._app.add_handler(CommandHandler("forget", self._cmd_forget, filters=allow))
         self._app.add_handler(CommandHandler("reset", self._cmd_reset, filters=allow))
         self._app.add_handler(CommandHandler("status", self._cmd_status, filters=allow))
+        self._app.add_handler(CommandHandler("llmops", self._cmd_llmops, filters=allow))
 
         # File/photo uploads
         self._app.add_handler(
@@ -68,6 +86,7 @@ class TelegramBot:
     def _command_menu(self) -> list[BotCommand]:
         return [
             BotCommand("status", "Show system status"),
+            BotCommand("llmops", "Show model usage and costs"),
             BotCommand("memories", "List stored memories"),
             BotCommand("forget", "Delete a memory by topic"),
             BotCommand("reset", "Clear chat history"),
@@ -82,8 +101,21 @@ class TelegramBot:
                 scope=BotCommandScopeChat(chat_id=settings.TELEGRAM_ALLOWED_USER_ID),
             )
             logger.info("Published %d Telegram bot command(s)", len(commands))
+            record_activity(
+                event="telegram_commands_published",
+                component="telegram",
+                summary="Published Telegram bot commands",
+                metadata={"command_count": len(commands)},
+            )
         except Exception:
             logger.exception("Failed to publish Telegram bot commands")
+            record_issue(
+                level="ERROR",
+                event="telegram_command_publish_failed",
+                component="telegram",
+                status="error",
+                summary="Failed to publish Telegram bot commands",
+            )
 
     # ------------------------------------------------------------------
     # Commands
@@ -142,6 +174,38 @@ class TelegramBot:
         ]
         await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
+    async def _cmd_llmops(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        summary = _load_llmops_summary()
+        if summary["call_count"] == 0:
+            await update.message.reply_text("No LLM activity recorded yet.")
+            return
+
+        lines = [
+            "*LLMOps*",
+            f"Calls: {summary['call_count']}",
+            f"Success: {_format_success_rate(summary['success_count'], summary['call_count'])}",
+            f"Avg latency: {summary['avg_latency_ms']:.1f} ms",
+            f"Tokens: {summary['input_tokens']} in / {summary['output_tokens']} out / {summary['total_tokens']} total",
+            f"Estimated cost: {_format_cost(summary['estimated_cost_usd'])} ({summary['priced_call_count']}/{summary['call_count']} priced)",
+            f"Models seen: {summary['model_count']}",
+            f"Last recorded: {summary['last_recorded_at'] or 'unknown'}",
+        ]
+        ops = _load_ops_health_summary()
+        lines.append(
+            f"Ops: heartbeat {ops['heartbeat_status']} ({ops['heartbeat_age_text']}) | issues {ops['issue_count']} | audit {ops['audit_count']}"
+        )
+        if summary["error_count"]:
+            lines.append(f"Issues: {summary['error_count']} failed or validation-error call(s)")
+        if summary["top_tasks"]:
+            lines.append("")
+            lines.append("*Top tasks*")
+            for task in summary["top_tasks"]:
+                lines.append(
+                    f"- {task['task']}: {task['call_count']} calls, {task['total_tokens']} tokens, {task['avg_latency_ms']:.1f} ms avg"
+                )
+
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
     # ------------------------------------------------------------------
     # Message handlers
     # ------------------------------------------------------------------
@@ -149,16 +213,37 @@ class TelegramBot:
     async def _handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_text = update.message.text
         logger.info("Received message from %s", update.effective_user.id)
+        op_id = new_op_id("telegram-message")
+        with operation_context(op_id):
+            record_activity(
+                event="telegram_message_received",
+                component="telegram",
+                summary="Received Telegram chat message",
+                metadata={"update_id": getattr(update, "update_id", 0)},
+            )
+            await update.message.chat.send_action("typing")
+            try:
+                response = self._agent.chat(user_text)
+            except Exception as e:
+                logger.exception("Agent error")
+                record_issue(
+                    level="ERROR",
+                    event="telegram_agent_reply_failed",
+                    component="telegram",
+                    status="error",
+                    summary="Failed to generate Telegram reply",
+                    metadata={"error": str(e)},
+                )
+                response = f"Sorry, something went wrong: {e}"
 
-        await update.message.chat.send_action("typing")
-        try:
-            response = self._agent.chat(user_text)
-        except Exception as e:
-            logger.exception("Agent error")
-            response = f"Sorry, something went wrong: {e}"
-
-        for chunk in _split_message(response, 4096):
-            await update.message.reply_text(chunk)
+            for chunk in _split_message(response, 4096):
+                await update.message.reply_text(chunk)
+            record_activity(
+                event="telegram_message_replied",
+                component="telegram",
+                summary="Sent Telegram chat reply",
+                metadata={"chunk_count": len(_split_message(response, 4096))},
+            )
 
     async def _handle_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         doc: Document = update.message.document
@@ -181,59 +266,85 @@ class TelegramBot:
             await update.message.reply_text("Drive not initialised, cannot file document.")
             return
 
-        await update.message.reply_text(f"Filing {filename}...")
-
-        try:
-            tg_file = await context.bot.get_file(file_id)
-            data = bytes(await tg_file.download_as_bytearray())
-
-            from agent_sdk.filer import classify_attachment
-            from memory.schema import MemoryCategory, MemoryConfidence, MemoryRecord, MemorySource
-            from utils.text_extraction import extract_text
-
-            text_content = extract_text(data, mime_type, filename)
-            classification = classify_attachment(filename, mime_type, text_content, raw_data=data)
-
-            folder_id = self._drive.get_or_create_folder_path(
-                classification.top_level, classification.sub_folder
+        op_id = new_op_id("telegram-file")
+        with operation_context(op_id):
+            record_activity(
+                event="telegram_file_received",
+                component="telegram",
+                summary="Received Telegram file for Drive filing",
+                metadata={"filename": filename, "mime_type": mime_type},
             )
-            drive_file_id = self._drive.upload_bytes(data, classification.filename, folder_id, mime_type)
+            await update.message.reply_text(f"Filing {filename}...")
 
-            # Store document_ref memory
-            record = MemoryRecord(
-                topic=f"file:{classification.filename}",
-                summary=classification.summary,
-                category=MemoryCategory.DOCUMENT_REF,
-                source=MemorySource.TELEGRAM,
-                confidence=MemoryConfidence.HIGH,
-                document_ref=drive_file_id,
-            )
-            self._memory.upsert(record)
+            try:
+                tg_file = await context.bot.get_file(file_id)
+                data = bytes(await tg_file.download_as_bytearray())
 
-            # Extract financial data for finance-classified documents
-            if classification.top_level == "Finances" and text_content:
-                from utils.financial_extraction import extract_financial_data
-                financial = extract_financial_data(text_content, classification.filename)
-                if financial:
-                    self._memory.add_financial_record(
-                        vendor=financial["vendor"],
-                        amount=financial["amount"],
-                        currency=financial["currency"],
-                        category=financial["category"],
-                        date=financial["date"],
-                        description=classification.summary,
-                        drive_file_id=drive_file_id,
-                        source="telegram",
-                    )
+                from agent_sdk.filer import classify_attachment
+                from memory.schema import MemoryCategory, MemoryConfidence, MemoryRecord, MemorySource
+                from utils.text_extraction import extract_text
 
-            await update.message.reply_text(
-                f"Filed to *{classification.top_level}/{classification.sub_folder}/{classification.filename}*\n"
-                f"{classification.summary}",
-                parse_mode="Markdown",
-            )
-        except Exception as e:
-            logger.exception("Failed to file document %s", filename)
-            await update.message.reply_text(f"Failed to file document: {e}")
+                text_content = extract_text(data, mime_type, filename)
+                classification = classify_attachment(filename, mime_type, text_content, raw_data=data)
+
+                folder_id = self._drive.get_or_create_folder_path(
+                    classification.top_level, classification.sub_folder
+                )
+                drive_file_id = self._drive.upload_bytes(data, classification.filename, folder_id, mime_type)
+
+                record = MemoryRecord(
+                    topic=f"file:{classification.filename}",
+                    summary=classification.summary,
+                    category=MemoryCategory.DOCUMENT_REF,
+                    source=MemorySource.TELEGRAM,
+                    confidence=MemoryConfidence.HIGH,
+                    document_ref=drive_file_id,
+                )
+                self._memory.upsert(record)
+
+                if classification.top_level == "Finances" and text_content:
+                    from utils.financial_extraction import extract_financial_data
+                    financial = extract_financial_data(text_content, classification.filename)
+                    if financial:
+                        self._memory.add_financial_record(
+                            vendor=financial["vendor"],
+                            amount=financial["amount"],
+                            currency=financial["currency"],
+                            category=financial["category"],
+                            date=financial["date"],
+                            description=classification.summary,
+                            drive_file_id=drive_file_id,
+                            source="telegram",
+                        )
+
+                await update.message.reply_text(
+                    f"Filed to *{classification.top_level}/{classification.sub_folder}/{classification.filename}*\n"
+                    f"{classification.summary}",
+                    parse_mode="Markdown",
+                )
+                record_activity(
+                    event="telegram_file_filed",
+                    component="telegram",
+                    summary="Filed Telegram document to Drive",
+                    metadata={"top_level": classification.top_level, "sub_folder": classification.sub_folder},
+                )
+                record_audit(
+                    event="telegram_file_filed",
+                    component="telegram",
+                    summary="Filed Telegram document to Drive",
+                    metadata={"filename": classification.filename, "top_level": classification.top_level},
+                )
+            except Exception as e:
+                logger.exception("Failed to file document %s", filename)
+                record_issue(
+                    level="ERROR",
+                    event="telegram_file_filing_failed",
+                    component="telegram",
+                    status="error",
+                    summary="Failed to file Telegram document",
+                    metadata={"filename": filename, "mime_type": mime_type, "error": str(e)},
+                )
+                await update.message.reply_text(f"Failed to file document: {e}")
 
 
 # ------------------------------------------------------------------
@@ -249,3 +360,179 @@ def _split_message(text: str, max_len: int) -> list[str]:
         chunks.append(text[:max_len])
         text = text[max_len:]
     return chunks
+
+
+def _parse_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _parse_float(value: Any) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _format_success_rate(success_count: int, call_count: int) -> str:
+    if call_count <= 0:
+        return "0%"
+    return f"{(success_count / call_count) * 100:.1f}%"
+
+
+def _format_cost(value: float | None) -> str:
+    if value is None:
+        return "unknown"
+    if value >= 1:
+        return f"${value:.2f}"
+    if value >= 0.01:
+        return f"${value:.4f}"
+    return f"${value:.6f}"
+
+
+def _load_llmops_summary(limit: int = 500) -> dict[str, Any]:
+    if not LLM_ACTIVITY_PATH.exists():
+        return {
+            "call_count": 0,
+            "success_count": 0,
+            "error_count": 0,
+            "avg_latency_ms": 0.0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "estimated_cost_usd": None,
+            "priced_call_count": 0,
+            "model_count": 0,
+            "last_recorded_at": "",
+            "top_tasks": [],
+        }
+
+    total_latency_ms = 0.0
+    success_count = 0
+    error_count = 0
+    input_tokens = 0
+    output_tokens = 0
+    total_tokens = 0
+    total_cost = 0.0
+    priced_call_count = 0
+    last_recorded_at = ""
+    models: set[str] = set()
+    tasks: dict[str, dict[str, float | int | str]] = defaultdict(
+        lambda: {"task": "", "call_count": 0, "latency_ms": 0.0, "total_tokens": 0}
+    )
+
+    try:
+        with LLM_ACTIVITY_PATH.open("r", encoding="utf-8", errors="replace") as handle:
+            lines = handle.readlines()[-limit:]
+    except Exception as exc:
+        logger.warning("Failed to read LLM activity file: %s", exc)
+        lines = []
+
+    for raw in lines:
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+
+        task = str(payload.get("task", "")).strip() or "unknown"
+        status = str(payload.get("status", "")).strip() or "unknown"
+        model = str(payload.get("model", "")).strip() or "unknown"
+        latency_ms = _parse_float(payload.get("latency_ms"))
+        current_total_tokens = _parse_int(payload.get("total_tokens"))
+        current_input_tokens = _parse_int(payload.get("input_tokens"))
+        current_output_tokens = _parse_int(payload.get("output_tokens"))
+        estimated_cost = payload.get("estimated_cost_usd")
+        estimated_cost_usd = None if estimated_cost in (None, "") else _parse_float(estimated_cost)
+
+        total_latency_ms += latency_ms
+        input_tokens += current_input_tokens
+        output_tokens += current_output_tokens
+        total_tokens += current_total_tokens
+        models.add(model)
+        if status == "ok":
+            success_count += 1
+        else:
+            error_count += 1
+        if estimated_cost_usd is not None:
+            total_cost += estimated_cost_usd
+            priced_call_count += 1
+        recorded_at = str(payload.get("recorded_at", "")).strip()
+        if recorded_at:
+            last_recorded_at = recorded_at
+
+        task_stats = tasks[task]
+        task_stats["task"] = task
+        task_stats["call_count"] = int(task_stats["call_count"]) + 1
+        task_stats["latency_ms"] = float(task_stats["latency_ms"]) + latency_ms
+        task_stats["total_tokens"] = int(task_stats["total_tokens"]) + current_total_tokens
+
+    call_count = sum(int(task["call_count"]) for task in tasks.values())
+    top_tasks = sorted(
+        (
+            {
+                "task": str(task["task"]),
+                "call_count": int(task["call_count"]),
+                "avg_latency_ms": float(task["latency_ms"]) / int(task["call_count"]),
+                "total_tokens": int(task["total_tokens"]),
+            }
+            for task in tasks.values()
+            if int(task["call_count"]) > 0
+        ),
+        key=lambda item: (-item["total_tokens"], item["task"]),
+    )[:3]
+
+    return {
+        "call_count": call_count,
+        "success_count": success_count,
+        "error_count": error_count,
+        "avg_latency_ms": (total_latency_ms / call_count) if call_count else 0.0,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+        "estimated_cost_usd": round(total_cost, 6) if priced_call_count else None,
+        "priced_call_count": priced_call_count,
+        "model_count": len(models),
+        "last_recorded_at": last_recorded_at,
+        "top_tasks": top_tasks,
+    }
+
+
+def _load_ops_health_summary(limit: int = 500) -> dict[str, Any]:
+    activity_payloads = read_jsonl(OPS_ACTIVITY_PATH, limit=limit)
+    issue_payloads = read_jsonl(OPS_ISSUES_PATH, limit=limit)
+    audit_payloads = read_jsonl(OPS_AUDIT_PATH, limit=limit)
+
+    heartbeat_status = "missing"
+    heartbeat_age_text = "unknown"
+    heartbeat = next(
+        (payload for payload in reversed(activity_payloads) if str(payload.get("event", "")) == "app_heartbeat"),
+        None,
+    )
+    if heartbeat is not None:
+        recorded_at = str(heartbeat.get("ts", "")).replace("Z", "+00:00")
+        try:
+            heartbeat_time = datetime.fromisoformat(recorded_at)
+            if heartbeat_time.tzinfo is None:
+                heartbeat_time = heartbeat_time.replace(tzinfo=timezone.utc)
+            age_seconds = max(int((datetime.now(timezone.utc) - heartbeat_time.astimezone(timezone.utc)).total_seconds()), 0)
+            heartbeat_status = "running" if age_seconds <= HEARTBEAT_INTERVAL_SECONDS * 2 else "stale"
+            heartbeat_age_text = _format_age(age_seconds)
+        except ValueError:
+            pass
+
+    return {
+        "heartbeat_status": heartbeat_status,
+        "heartbeat_age_text": heartbeat_age_text,
+        "issue_count": len(issue_payloads),
+        "audit_count": len(audit_payloads),
+    }
+
+
+def _format_age(seconds: int) -> str:
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes = seconds // 60
+    remainder = seconds % 60
+    return f"{minutes}m {remainder}s"

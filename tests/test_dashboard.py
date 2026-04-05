@@ -104,6 +104,33 @@ def create_memory_db(path: Path) -> None:
     conn.close()
 
 
+def write_llm_activity(path: Path, *records: dict) -> None:
+    path.write_text(
+        "\n".join(json.dumps(record) for record in records) + ("\n" if records else ""),
+        encoding="utf-8",
+    )
+
+
+def write_jsonl(path: Path, *records: dict) -> None:
+    path.write_text(
+        "\n".join(json.dumps(record) for record in records) + ("\n" if records else ""),
+        encoding="utf-8",
+    )
+
+
+def configure_dashboard_module(module, temp_root: Path) -> None:
+    module.ROOT = temp_root
+    module.LOG_PATH = temp_root / "logs" / "jarvis.log"
+    module.DB_PATH = temp_root / "data" / "jarvis_memory.db"
+    module.GMAIL_ACTIVITY_PATH = temp_root / "data" / "gmail_activity.jsonl"
+    module.GMAIL_STATE_PATH = temp_root / "data" / "gmail_state.txt"
+    module.TOKEN_PATH = temp_root / "token.json"
+    module.LLM_ACTIVITY_PATH = temp_root / "data" / "llm_activity.jsonl"
+    module.OPS_ACTIVITY_PATH = temp_root / "data" / "ops_activity.jsonl"
+    module.OPS_ISSUES_PATH = temp_root / "data" / "ops_issues.jsonl"
+    module.OPS_AUDIT_PATH = temp_root / "data" / "ops_audit.jsonl"
+
+
 class DashboardTests(unittest.TestCase):
     def test_default_snapshot_skips_drive_loading(self):
         with TemporaryDirectory() as td:
@@ -120,12 +147,7 @@ class DashboardTests(unittest.TestCase):
             )
             create_memory_db(temp_root / "data" / "jarvis_memory.db")
             module = load_module("tested_dashboard_no_drive", "dashboard/app.py")
-            module.ROOT = temp_root
-            module.LOG_PATH = temp_root / "logs" / "jarvis.log"
-            module.DB_PATH = temp_root / "data" / "jarvis_memory.db"
-            module.GMAIL_ACTIVITY_PATH = temp_root / "data" / "gmail_activity.jsonl"
-            module.GMAIL_STATE_PATH = temp_root / "data" / "gmail_state.txt"
-            module.TOKEN_PATH = temp_root / "token.json"
+            configure_dashboard_module(module, temp_root)
 
             def fail_drive_load():
                 raise AssertionError("drive snapshot should not be loaded")
@@ -151,12 +173,7 @@ class DashboardTests(unittest.TestCase):
             )
             create_memory_db(temp_root / "data" / "jarvis_memory.db")
             module = load_module("tested_dashboard_logo", "dashboard/app.py")
-            module.ROOT = temp_root
-            module.LOG_PATH = temp_root / "logs" / "jarvis.log"
-            module.DB_PATH = temp_root / "data" / "jarvis_memory.db"
-            module.GMAIL_ACTIVITY_PATH = temp_root / "data" / "gmail_activity.jsonl"
-            module.GMAIL_STATE_PATH = temp_root / "data" / "gmail_state.txt"
-            module.TOKEN_PATH = temp_root / "token.json"
+            configure_dashboard_module(module, temp_root)
             module.LOGO_PATH = temp_root / "dashboard" / "assets" / "jarvis-mark.svg"
             module.LOGO_PATH.parent.mkdir(parents=True)
             module.LOGO_PATH.write_text(
@@ -208,12 +225,7 @@ class DashboardTests(unittest.TestCase):
                 + "\n"
             )
             module = load_module("tested_dashboard_memory", "dashboard/app.py")
-            module.ROOT = temp_root
-            module.LOG_PATH = temp_root / "logs" / "jarvis.log"
-            module.DB_PATH = temp_root / "data" / "jarvis_memory.db"
-            module.GMAIL_ACTIVITY_PATH = temp_root / "data" / "gmail_activity.jsonl"
-            module.GMAIL_STATE_PATH = temp_root / "data" / "gmail_state.txt"
-            module.TOKEN_PATH = temp_root / "token.json"
+            configure_dashboard_module(module, temp_root)
             module._load_drive_snapshot = lambda: ([], "unavailable", "credentials missing")
 
             snapshot = module.collect_snapshot(include_memories=True)
@@ -241,12 +253,7 @@ class DashboardTests(unittest.TestCase):
             )
             create_memory_db(temp_root / "data" / "jarvis_memory.db")
             module = load_module("tested_dashboard_drive", "dashboard/app.py")
-            module.ROOT = temp_root
-            module.LOG_PATH = temp_root / "logs" / "jarvis.log"
-            module.DB_PATH = temp_root / "data" / "jarvis_memory.db"
-            module.GMAIL_ACTIVITY_PATH = temp_root / "data" / "gmail_activity.jsonl"
-            module.GMAIL_STATE_PATH = temp_root / "data" / "gmail_state.txt"
-            module.TOKEN_PATH = temp_root / "token.json"
+            configure_dashboard_module(module, temp_root)
             module._load_drive_snapshot = lambda: (
                 [
                     module.DriveFileItem(
@@ -285,12 +292,7 @@ class DashboardTests(unittest.TestCase):
             )
             create_memory_db(temp_root / "data" / "jarvis_memory.db")
             module = load_module("tested_dashboard_drive_missing", "dashboard/app.py")
-            module.ROOT = temp_root
-            module.LOG_PATH = temp_root / "logs" / "jarvis.log"
-            module.DB_PATH = temp_root / "data" / "jarvis_memory.db"
-            module.GMAIL_ACTIVITY_PATH = temp_root / "data" / "gmail_activity.jsonl"
-            module.GMAIL_STATE_PATH = temp_root / "data" / "gmail_state.txt"
-            module.TOKEN_PATH = temp_root / "token.json"
+            configure_dashboard_module(module, temp_root)
             module._load_drive_snapshot = lambda: ([], "unavailable", "Google credentials/token not available")
 
             snapshot = module.collect_snapshot(include_drive=True)
@@ -315,12 +317,7 @@ class DashboardTests(unittest.TestCase):
             )
             create_memory_db(temp_root / "data" / "jarvis_memory.db")
             module = load_module("tested_dashboard_polling", "dashboard/app.py")
-            module.ROOT = temp_root
-            module.LOG_PATH = temp_root / "logs" / "jarvis.log"
-            module.DB_PATH = temp_root / "data" / "jarvis_memory.db"
-            module.GMAIL_ACTIVITY_PATH = temp_root / "data" / "gmail_activity.jsonl"
-            module.GMAIL_STATE_PATH = temp_root / "data" / "gmail_state.txt"
-            module.TOKEN_PATH = temp_root / "token.json"
+            configure_dashboard_module(module, temp_root)
             module._load_drive_snapshot = lambda: ([], "unavailable", "credentials missing")
 
             snapshot = module.collect_snapshot()
@@ -333,6 +330,126 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("visibilitychange", html)
         self.assertIn("AbortController", html)
         self.assertIn('document.visibilityState !== "visible"', html)
+
+    def test_llmops_tab_renders_usage_and_costs(self):
+        with TemporaryDirectory() as td:
+            temp_root = Path(td)
+            (temp_root / "logs").mkdir()
+            (temp_root / "data").mkdir()
+            (temp_root / "logs" / "jarvis.log").write_text(
+                "\n".join(
+                    [
+                        "2026-04-05 15:00:00 [INFO] __main__: Starting Jarvis...",
+                        "2026-04-05 15:03:00 [INFO] telegram.ext.Application: Application started",
+                    ]
+                )
+            )
+            create_memory_db(temp_root / "data" / "jarvis_memory.db")
+            write_llm_activity(
+                temp_root / "data" / "llm_activity.jsonl",
+                {
+                    "recorded_at": "2026-04-05T15:05:00+00:00",
+                    "task": "chat",
+                    "model": "anthropic/claude-sonnet-4.6",
+                    "status": "ok",
+                    "latency_ms": 820.5,
+                    "input_tokens": 1000,
+                    "output_tokens": 200,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                    "total_tokens": 1200,
+                    "estimated_cost_usd": 0.006,
+                    "error": "",
+                },
+                {
+                    "recorded_at": "2026-04-05T15:06:00+00:00",
+                    "task": "relevance",
+                    "model": "google/gemma-4-31b-it",
+                    "status": "validation_error",
+                    "latency_ms": 120.0,
+                    "input_tokens": 80,
+                    "output_tokens": 30,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                    "total_tokens": 110,
+                    "estimated_cost_usd": None,
+                    "error": "No JSON object found in model response.",
+                },
+            )
+            write_jsonl(
+                temp_root / "data" / "ops_activity.jsonl",
+                {
+                    "ts": "2026-04-05T15:07:00+00:00",
+                    "kind": "activity",
+                    "level": "INFO",
+                    "component": "runtime",
+                    "event": "app_heartbeat",
+                    "status": "ok",
+                    "summary": "Marvis heartbeat",
+                },
+            )
+            write_jsonl(
+                temp_root / "data" / "ops_issues.jsonl",
+                {
+                    "ts": "2026-04-05T15:04:00+00:00",
+                    "kind": "issue",
+                    "level": "WARNING",
+                    "component": "gmail",
+                    "event": "email_processing_partial",
+                    "status": "partial",
+                    "summary": "Email processing completed with partial failures",
+                    "duration_ms": 531.2,
+                },
+                {
+                    "ts": "2026-04-05T15:06:30+00:00",
+                    "kind": "issue",
+                    "level": "ERROR",
+                    "component": "telegram",
+                    "event": "telegram_file_filing_failed",
+                    "status": "error",
+                    "summary": "Failed to file Telegram document",
+                },
+            )
+            write_jsonl(
+                temp_root / "data" / "ops_audit.jsonl",
+                {
+                    "ts": "2026-04-05T15:06:45+00:00",
+                    "kind": "audit",
+                    "level": "INFO",
+                    "component": "memory",
+                    "event": "task_created",
+                    "status": "ok",
+                    "summary": "Created task",
+                },
+            )
+            module = load_module("tested_dashboard_llmops", "dashboard/app.py")
+            configure_dashboard_module(module, temp_root)
+            module._load_drive_snapshot = lambda: ([], "unavailable", "credentials missing")
+
+            snapshot = module.collect_snapshot()
+            html = module._render_snapshot(snapshot, tab="llmops")
+
+        self.assertEqual(snapshot.llmops_summary.call_count, 2)
+        self.assertEqual(snapshot.llmops_summary.total_tokens, 1310)
+        self.assertAlmostEqual(snapshot.llmops_summary.estimated_cost_usd or 0.0, 0.006)
+        self.assertIn("LLMOps", html)
+        self.assertIn("Task Breakdown", html)
+        self.assertIn("Recent Calls", html)
+        self.assertIn("Operational Logging", html)
+        self.assertIn("Charts", html)
+        self.assertIn("LLM Cost by Hour", html)
+        self.assertIn("Tokens by Task", html)
+        self.assertIn("Issues by Component", html)
+        self.assertIn("Heartbeat Timeline", html)
+        self.assertIn("Issue Breakdown", html)
+        self.assertIn("Recent Audit Events", html)
+        self.assertIn("<svg", html)
+        self.assertIn("anthropic/claude-sonnet-4.6", html)
+        self.assertIn("validation_error", html)
+        self.assertIn("$0.006000", html)
+        self.assertIn("No JSON object found in model response.", html)
+        self.assertIn("Email processing completed with partial failures", html)
+        self.assertIn("Created task", html)
 
 
 if __name__ == "__main__":
