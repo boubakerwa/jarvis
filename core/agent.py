@@ -1,7 +1,10 @@
 import logging
+from datetime import datetime, timezone
+from time import monotonic
 from typing import Optional
 
 from config import settings
+from core.llmops import record_llm_call
 from core.llm_client import create_llm_client, get_model_name
 from core.prompts import build_system_prompt
 from core.time_utils import (
@@ -348,17 +351,46 @@ class JarvisAgent:
         messages = list(self._history)
 
         while True:
-            response = self._client.messages.create(
-                model=get_model_name(),
-                max_tokens=settings.MAX_TOKENS,
-                system=system_prompt,
-                tools=TOOLS,
-                messages=messages,
-            )
+            model_name = get_model_name()
+            started_at = datetime.now(timezone.utc).isoformat()
+            started_clock = monotonic()
+            try:
+                response = self._client.messages.create(
+                    model=model_name,
+                    max_tokens=settings.MAX_TOKENS,
+                    system=system_prompt,
+                    tools=TOOLS,
+                    messages=messages,
+                )
+            except Exception as exc:
+                record_llm_call(
+                    task="chat",
+                    model=model_name,
+                    status="api_error",
+                    started_at=started_at,
+                    latency_ms=(monotonic() - started_clock) * 1000,
+                    error=str(exc),
+                    metadata={"channel": "chat", "history_messages": len(messages)},
+                )
+                raise
 
             # Collect all tool uses and text from this response
             tool_uses = [b for b in response.content if b.type == "tool_use"]
             text_blocks = [b for b in response.content if b.type == "text"]
+            record_llm_call(
+                task="chat",
+                model=model_name,
+                status="ok",
+                started_at=started_at,
+                latency_ms=(monotonic() - started_clock) * 1000,
+                response=response,
+                metadata={
+                    "channel": "chat",
+                    "history_messages": len(messages),
+                    "tool_use_count": len(tool_uses),
+                    "text_block_count": len(text_blocks),
+                },
+            )
 
             if response.stop_reason == "end_turn" or not tool_uses:
                 # Done — return combined text

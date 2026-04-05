@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from core.opslog import record_audit
 from notes.obsidian import ObsidianVault, slugify
 
 
@@ -38,12 +39,24 @@ class NotesManager:
             frontmatter=frontmatter,
             body=note_body,
         )
+        record_audit(
+            event="note_created",
+            component="notes",
+            summary="Created note in shared workspace",
+            metadata={"folder": folder or "", "path": note["path"]},
+        )
         return {"path": note["path"], "title": cleaned_title}
 
     def append_note(self, path: str, content: str) -> dict:
         if not content.strip():
             raise ValueError("Appended note content cannot be empty.")
         note = self._vault.append_to_note(path, content.strip())
+        record_audit(
+            event="note_appended",
+            component="notes",
+            summary="Appended content to note",
+            metadata={"path": note["path"]},
+        )
         return {"path": note["path"]}
 
     def search_notes(self, query: str, folder: str | None = None, limit: int = 5) -> list[dict]:
