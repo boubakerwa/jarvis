@@ -1,18 +1,14 @@
 """
 Relevance filter for incoming emails (PRD §6.4).
 
-Claude evaluates each email and decides whether it contains a document worth filing.
+The configured LLM evaluates each email and decides whether it contains a document worth filing.
 Transactional emails (newsletters, OTPs, notifications, marketing) are skipped.
 Contracts, invoices, insurance documents, travel bookings, and official correspondence
 are considered worth filing.
 """
-import json
 import logging
-import re
 
-import anthropic
-
-from config import settings
+from core.structured_output import StructuredOutputError, generate_validated_json
 
 logger = logging.getLogger(__name__)
 
@@ -20,14 +16,17 @@ _RELEVANCE_PROMPT = """\
 You are an email triage assistant. Decide whether this email contains a document \
 worth filing in a personal document library.
 
+The email may be in English or German. Evaluate it correctly regardless of language.
+
 FILE if the email contains or is:
-- Contracts, agreements, or legal documents
-- Invoices, receipts, or payment confirmations
-- Insurance documents or policies
+- Contracts, agreements, or legal documents (Vertrag, Vereinbarung)
+- Invoices, receipts, or payment confirmations (Rechnung, Quittung, Zahlungsbestätigung)
+- Insurance documents or policies (Versicherung, Police, Krankenversicherung)
 - Travel bookings, tickets, or itineraries
-- Official correspondence (government, tax, bank, employer)
+- Official correspondence (government, tax, bank, employer) (Steuerbescheid, Kontoauszug, Bescheid)
 - Health records, prescriptions, or medical documents
-- Certificates, credentials, or licences
+- Certificates, credentials, or licences (Bescheinigung, Zertifikat)
+- Dunning notices or formal reminders (Mahnung)
 
 SKIP if the email is:
 - A newsletter or marketing email
@@ -50,6 +49,24 @@ Email details:
 """
 
 
+def _coerce_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "yes", "file", "1"}:
+            return True
+        if lowered in {"false", "no", "skip", "0"}:
+            return False
+    raise ValueError(f"Invalid should_file value: {value!r}")
+
+
+def _validate_relevance_payload(data: dict) -> tuple[bool, str]:
+    should_file = _coerce_bool(data.get("should_file", True))
+    reason = str(data.get("reason", "")).strip() or "model classified the email"
+    return should_file, reason[:240]
+
+
 def is_worth_filing(email) -> tuple[bool, str]:
     """
     Returns (should_file, reason).
@@ -64,22 +81,15 @@ def is_worth_filing(email) -> tuple[bool, str]:
     )
 
     try:
-        client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
-        response = client.messages.create(
-            model=settings.CLAUDE_MODEL,
+        should_file, reason = generate_validated_json(
+            task="relevance",
             max_tokens=128,
             messages=[{"role": "user", "content": prompt}],
+            validator=_validate_relevance_payload,
+            allow_fallback=False,
         )
-        raw = response.content[0].text.strip()
-        json_match = re.search(r"\{.*\}", raw, re.DOTALL)
-        if not json_match:
-            raise ValueError(f"No JSON in relevance response: {raw!r}")
-
-        data = json.loads(json_match.group())
-        should_file = bool(data.get("should_file", True))
-        reason = data.get("reason", "")
         return should_file, reason
 
-    except Exception as e:
+    except (StructuredOutputError, ValueError) as e:
         logger.warning("Relevance check failed (%s) — defaulting to file", e)
         return True, "relevance check failed, filing by default"

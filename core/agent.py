@@ -1,17 +1,23 @@
-import json
 import logging
 from typing import Optional
 
-import anthropic
-
 from config import settings
+from core.llm_client import create_llm_client, get_model_name
 from core.prompts import build_system_prompt
+from core.time_utils import (
+    contains_explicit_date,
+    day_bounds_for_calendar,
+    extract_relative_date_expression,
+    get_local_now,
+    resolve_date_expression,
+    resolve_event_time,
+)
 from memory.manager import MemoryManager
 from memory.schema import MemoryCategory, MemoryConfidence, MemoryRecord, MemorySource
 
 logger = logging.getLogger(__name__)
 
-# Tool definitions passed to Claude
+# Tool definitions passed to the model
 TOOLS: list[dict] = [
     {
         "name": "remember",
@@ -33,7 +39,7 @@ TOOLS: list[dict] = [
                 },
                 "category": {
                     "type": "string",
-                    "enum": ["preference", "fact", "decision", "document_ref", "project", "household", "finance", "health"],
+                    "enum": ["preference", "fact", "decision", "document_ref", "project", "household", "finance", "health", "task"],
                 },
                 "source": {
                     "type": "string",
@@ -80,7 +86,7 @@ TOOLS: list[dict] = [
             "properties": {
                 "category": {
                     "type": "string",
-                    "enum": ["preference", "fact", "decision", "document_ref", "project", "household", "finance", "health"],
+                    "enum": ["preference", "fact", "decision", "document_ref", "project", "household", "finance", "health", "task"],
                     "description": "Optional category filter.",
                 },
             },
@@ -97,15 +103,152 @@ TOOLS: list[dict] = [
             "required": ["query"],
         },
     },
+    {
+        "name": "read_drive_file",
+        "description": (
+            "Download and read the contents of a file from Google Drive. "
+            "Use file IDs returned by search_drive. Enables document Q&A."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "file_id": {"type": "string", "description": "Google Drive file ID."},
+            },
+            "required": ["file_id"],
+        },
+    },
+    {
+        "name": "check_calendar",
+        "description": (
+            "Check Google Calendar events. "
+            "Prefer date_expression for relative dates like 'today', 'tomorrow', or 'monday'. "
+            "Use start_date/end_date only for explicit YYYY-MM-DD dates."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "date_expression": {
+                    "type": "string",
+                    "description": "Preferred for relative dates such as 'today', 'tomorrow', 'monday', or 'next friday'.",
+                },
+                "start_date": {
+                    "type": "string",
+                    "description": "Start date (YYYY-MM-DD). Defaults to today.",
+                },
+                "end_date": {
+                    "type": "string",
+                    "description": "End date (YYYY-MM-DD). Defaults to end of start_date.",
+                },
+                "max_results": {"type": "integer", "default": 10},
+            },
+        },
+    },
+    {
+        "name": "create_event",
+        "description": (
+            "Create a new Google Calendar event. "
+            "Prefer when for relative or natural-language dates/times; use start/end only for explicit ISO datetimes."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Event title."},
+                "when": {
+                    "type": "string",
+                    "description": "Preferred natural-language date/time, e.g. 'monday', 'tomorrow at 3pm', '2026-04-06'.",
+                },
+                "start": {
+                    "type": "string",
+                    "description": "Start datetime (ISO 8601 with timezone, e.g. 2026-04-02T14:00:00+02:00).",
+                },
+                "end": {
+                    "type": "string",
+                    "description": "End datetime (ISO 8601). Defaults to 1 hour after start.",
+                },
+                "description": {"type": "string", "description": "Optional event description."},
+                "location": {"type": "string", "description": "Optional location."},
+            },
+            "required": ["title"],
+        },
+    },
+    {
+        "name": "create_task",
+        "description": (
+            "Create a task or reminder. "
+            "ONLY use when Wess explicitly asks — e.g. 'remind me to...', 'add to my todo', 'create a task'. "
+            "Never create tasks proactively."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "description": {"type": "string", "description": "What needs to be done."},
+                "due_date_expression": {
+                    "type": "string",
+                    "description": "Preferred for relative dates like 'monday', 'tomorrow', or 'next friday'.",
+                },
+                "due_date": {"type": "string", "description": "Optional due date (YYYY-MM-DD)."},
+            },
+            "required": ["description"],
+        },
+    },
+    {
+        "name": "list_tasks",
+        "description": "List tasks. Use when Wess asks about his tasks, todos, or reminders.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": ["pending", "done", "all"],
+                    "default": "pending",
+                },
+            },
+        },
+    },
+    {
+        "name": "complete_task",
+        "description": "Mark a task as done.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "Task ID from list_tasks results."},
+            },
+            "required": ["task_id"],
+        },
+    },
+    {
+        "name": "financial_summary",
+        "description": "Query financial records (invoices, receipts, subscriptions, etc.) that have been filed to Drive.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "start_date": {
+                    "type": "string",
+                    "description": "Start date (YYYY-MM-DD). Defaults to 30 days ago.",
+                },
+                "end_date": {
+                    "type": "string",
+                    "description": "End date (YYYY-MM-DD). Defaults to today.",
+                },
+                "vendor": {"type": "string", "description": "Filter by vendor name (partial match)."},
+                "category": {
+                    "type": "string",
+                    "description": "Filter by category: invoice, receipt, subscription, insurance, tax, bank, other.",
+                },
+            },
+        },
+    },
 ]
 
 
 class JarvisAgent:
-    def __init__(self, memory_manager: MemoryManager, drive_client=None):
-        self._client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+    def __init__(self, memory_manager: MemoryManager, drive_client=None, calendar_client=None):
+        self._client = create_llm_client()
         self._memory = memory_manager
         self._drive = drive_client
+        self._calendar = calendar_client
         self._history: list[dict] = []
+        self._current_user_message = ""
 
     # ------------------------------------------------------------------
     # Public
@@ -113,6 +256,7 @@ class JarvisAgent:
 
     def chat(self, user_message: str) -> str:
         """Process a user message and return Jarvis's response."""
+        self._current_user_message = user_message
         self._history.append({"role": "user", "content": user_message})
         self._trim_history()
 
@@ -134,7 +278,7 @@ class JarvisAgent:
 
         while True:
             response = self._client.messages.create(
-                model=settings.CLAUDE_MODEL,
+                model=get_model_name(),
                 max_tokens=settings.MAX_TOKENS,
                 system=system_prompt,
                 tools=TOOLS,
@@ -176,11 +320,31 @@ class JarvisAgent:
                 return self._tool_list_memories(inputs)
             elif name == "search_drive":
                 return self._tool_search_drive(inputs)
+            elif name == "read_drive_file":
+                return self._tool_read_drive_file(inputs)
+            elif name == "check_calendar":
+                return self._tool_check_calendar(inputs)
+            elif name == "create_event":
+                return self._tool_create_event(inputs)
+            elif name == "create_task":
+                return self._tool_create_task(inputs)
+            elif name == "list_tasks":
+                return self._tool_list_tasks(inputs)
+            elif name == "complete_task":
+                return self._tool_complete_task(inputs)
+            elif name == "financial_summary":
+                return self._tool_financial_summary(inputs)
             else:
                 return f"Unknown tool: {name}"
         except Exception as e:
             logger.exception("Tool %s failed", name)
             return f"Error executing {name}: {e}"
+
+    def _relative_date_hint_from_user(self) -> Optional[str]:
+        text = self._current_user_message or ""
+        if not text or contains_explicit_date(text):
+            return None
+        return extract_relative_date_expression(text)
 
     # ------------------------------------------------------------------
     # Tool implementations
@@ -233,6 +397,190 @@ class JarvisAgent:
             return "No files found."
         lines = [f"- {r['name']} (ID: {r['id']}, path: {r.get('path', 'unknown')})" for r in results]
         return "\n".join(lines)
+
+    def _tool_read_drive_file(self, inputs: dict) -> str:
+        if not self._drive:
+            return "Drive client not initialised."
+        file_id = inputs["file_id"]
+        try:
+            data, filename, mime_type = self._drive.download_file(file_id)
+        except Exception as e:
+            return f"Failed to download file: {e}"
+
+        from utils.text_extraction import describe_image, extract_text
+        if mime_type.startswith("image/"):
+            text = describe_image(data, mime_type)
+        else:
+            text = extract_text(data, mime_type, filename)
+
+        if not text:
+            return f"Could not extract text from '{filename}' (type: {mime_type})."
+
+        # Truncate to avoid blowing context window
+        max_chars = 8000
+        if len(text) > max_chars:
+            text = text[:max_chars] + f"\n\n[...truncated — {len(text) - max_chars} more chars]"
+        return f"Contents of '{filename}':\n\n{text}"
+
+    def _tool_financial_summary(self, inputs: dict) -> str:
+        from datetime import date, timedelta
+        today = date.today()
+        default_start = (today - timedelta(days=30)).isoformat()
+
+        start_date = inputs.get("start_date", default_start)
+        end_date = inputs.get("end_date", today.isoformat())
+        vendor = inputs.get("vendor")
+        category = inputs.get("category")
+
+        if vendor or category:
+            records = self._memory.query_financials(start_date, end_date, vendor, category)
+            if not records:
+                return "No financial records found matching your query."
+            lines = []
+            for r in records:
+                lines.append(
+                    f"- {r.get('date', '?')} | {r.get('vendor', '?')} | "
+                    f"{r.get('amount', 0):.2f} {r.get('currency', 'EUR')} | {r.get('category', '?')}"
+                )
+            return "\n".join(lines)
+
+        summary = self._memory.financial_summary(start_date, end_date)
+        if summary["record_count"] == 0:
+            return f"No financial records between {start_date} and {end_date}."
+
+        lines = [f"Financial summary ({start_date} → {end_date}):"]
+        lines.append(f"Total: {summary['total']:.2f} EUR ({summary['record_count']} records)")
+        if summary["by_category"]:
+            lines.append("\nBy category:")
+            for cat, amt in sorted(summary["by_category"].items(), key=lambda x: -x[1]):
+                lines.append(f"  {cat}: {amt:.2f}")
+        if summary["by_vendor"]:
+            lines.append("\nTop vendors:")
+            top_vendors = sorted(summary["by_vendor"].items(), key=lambda x: -x[1])[:5]
+            for vendor_name, amt in top_vendors:
+                lines.append(f"  {vendor_name}: {amt:.2f}")
+        return "\n".join(lines)
+
+    def _tool_create_task(self, inputs: dict) -> str:
+        description = inputs["description"]
+        due_expression = inputs.get("due_date_expression") or self._relative_date_hint_from_user()
+        due_date = inputs.get("due_date")
+        if due_expression:
+            try:
+                due_date = resolve_date_expression(due_expression, now=get_local_now()).isoformat()
+            except ValueError as e:
+                return f"Could not resolve task due date '{due_expression}': {e}"
+        task = self._memory.create_task(description, due_date)
+        short_id = task["id"][:8]
+        due_str = f", due {task['due_date']}" if task.get("due_date") else ""
+        return f"Task created (ID: {short_id}{due_str}): {description}"
+
+    def _tool_list_tasks(self, inputs: dict) -> str:
+        status = inputs.get("status", "pending")
+        tasks = self._memory.list_tasks(status)
+        if not tasks:
+            return f"No {status} tasks." if status != "all" else "No tasks found."
+        lines = []
+        for t in tasks:
+            short_id = t["id"][:8]
+            due_str = f" [due: {t['due_date']}]" if t.get("due_date") else ""
+            status_str = f" [{t['status']}]" if status == "all" else ""
+            lines.append(f"- [{short_id}]{due_str}{status_str} {t['description']}")
+        return "\n".join(lines)
+
+    def _tool_complete_task(self, inputs: dict) -> str:
+        task_id = inputs["task_id"]
+        # Support short IDs: look up the full ID
+        tasks = self._memory.list_tasks("pending")
+        full_id = None
+        for t in tasks:
+            if t["id"].startswith(task_id) or t["id"] == task_id:
+                full_id = t["id"]
+                break
+        if not full_id:
+            return f"No pending task found with ID starting with '{task_id}'."
+        done = self._memory.complete_task(full_id)
+        return "Task marked as done." if done else "Could not complete task."
+
+    def _tool_check_calendar(self, inputs: dict) -> str:
+        if not self._calendar:
+            return "Calendar client not initialised."
+
+        date_expression = inputs.get("date_expression") or self._relative_date_hint_from_user()
+        if date_expression:
+            try:
+                start_date = resolve_date_expression(date_expression, now=get_local_now())
+                end_date = start_date
+            except ValueError as e:
+                return f"Could not resolve calendar date '{date_expression}': {e}"
+        else:
+            today = get_local_now().date()
+            start_str = inputs.get("start_date", str(today))
+            end_str = inputs.get("end_date", start_str)
+
+            try:
+                from datetime import date
+                start_date = date.fromisoformat(start_str)
+                end_date = date.fromisoformat(end_str)
+            except ValueError as e:
+                return f"Invalid date format: {e}"
+
+        max_results = inputs.get("max_results", 10)
+        time_min, time_max = day_bounds_for_calendar(start_date, now=get_local_now())
+        if end_date != start_date:
+            time_min, _ = day_bounds_for_calendar(start_date, now=get_local_now())
+            _, time_max = day_bounds_for_calendar(end_date, now=get_local_now())
+
+        try:
+            events = self._calendar.get_events(time_min, time_max, max_results=max_results)
+        except Exception as e:
+            return f"Failed to fetch calendar events: {e}"
+
+        if not events:
+            return f"No events found between {start_date.isoformat()} and {end_date.isoformat()}."
+
+        lines = []
+        for e in events:
+            line = f"- {e['start']} — {e['summary']}"
+            if e.get("location"):
+                line += f" @ {e['location']}"
+            if e.get("description"):
+                line += f"\n  {e['description'][:100]}"
+            lines.append(line)
+        return "\n".join(lines)
+
+    def _tool_create_event(self, inputs: dict) -> str:
+        if not self._calendar:
+            return "Calendar client not initialised."
+        title = inputs["title"]
+        when_expression = inputs.get("when") or self._relative_date_hint_from_user()
+        start = inputs.get("start", "")
+        end = inputs.get("end", "")
+        description = inputs.get("description", "")
+        location = inputs.get("location", "")
+        all_day = False
+
+        if when_expression:
+            try:
+                resolved = resolve_event_time(when_expression, now=get_local_now())
+            except ValueError as e:
+                return f"Could not resolve event time '{when_expression}': {e}"
+            start = resolved.start
+            end = resolved.end
+            all_day = resolved.all_day
+        elif not start:
+            return "Missing event start time."
+
+        try:
+            event = self._calendar.create_event(title, start, end, description, location, all_day=all_day)
+        except Exception as e:
+            return f"Failed to create event: {e}"
+
+        return (
+            f"Event created: '{event['summary']}' "
+            f"from {event.get('start', start)} to {event.get('end', end)} "
+            f"(ID: {event['id']})"
+        )
 
     # ------------------------------------------------------------------
     # History management

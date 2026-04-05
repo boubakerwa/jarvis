@@ -1,10 +1,13 @@
 """
-Jarvis — entry point.
+Marvis — entry point.
 Starts the Telegram bot (main thread) and Gmail watcher (background thread).
 """
+import json
 import logging
 import os
 import threading
+from datetime import datetime, timezone
+from typing import Optional
 
 # Ensure data/ and logs/ directories exist before anything else
 os.makedirs("data", exist_ok=True)
@@ -20,12 +23,35 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+_GMAIL_ACTIVITY_FILE = "data/gmail_activity.jsonl"
+
+
+def _record_gmail_activity(email, outcome: str, reason: str = "", details: Optional[dict] = None) -> None:
+    payload = {
+        "processed_at": datetime.now(timezone.utc).isoformat(),
+        "message_id": email.message_id,
+        "thread_id": email.thread_id,
+        "from": email.sender,
+        "subject": email.subject,
+        "date": email.date,
+        "attachment_count": len(email.attachments),
+        "outcome": outcome,
+        "reason": reason,
+    }
+    if details:
+        payload["details"] = details
+
+    os.makedirs(os.path.dirname(os.path.abspath(_GMAIL_ACTIVITY_FILE)), exist_ok=True)
+    with open(_GMAIL_ACTIVITY_FILE, "a") as f:
+        f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
 
 def _handle_email(email, memory_manager, drive_client):
     """Process a new email: check relevance, then classify attachments and file to Drive."""
     from agent_sdk.filer import classify_attachment
     from gmail.relevance import is_worth_filing
     from memory.schema import MemoryCategory, MemoryConfidence, MemoryRecord, MemorySource
+    from utils.financial_extraction import extract_financial_data
 
     logger.info(
         "Processing email: from=%s subject=%s attachments=%d",
@@ -37,9 +63,17 @@ def _handle_email(email, memory_manager, drive_client):
     should_file, reason = is_worth_filing(email)
     if not should_file:
         logger.info("Skipping email (not worth filing): %s — %s", email.subject, reason)
+        _record_gmail_activity(email, "skipped", reason)
         return
 
     logger.info("Filing email: %s — %s", email.subject, reason)
+    if not email.attachments:
+        logger.info("Email marked worth filing but has no attachments: %s", email.subject)
+        _record_gmail_activity(email, "no_attachments", reason)
+        return
+
+    filed_attachments: list[dict] = []
+    failed_attachments: list[dict] = []
 
     for attachment in email.attachments:
         try:
@@ -47,6 +81,7 @@ def _handle_email(email, memory_manager, drive_client):
                 attachment.filename,
                 attachment.mime_type,
                 attachment.text_content,
+                raw_data=attachment.data,
             )
             folder_id = drive_client.get_or_create_folder_path(
                 classification.top_level, classification.sub_folder
@@ -66,6 +101,22 @@ def _handle_email(email, memory_manager, drive_client):
                 document_ref=drive_file_id,
             )
             memory_manager.upsert(record)
+
+            # Extract financial data for finance-classified documents
+            if classification.top_level == "Finances" and attachment.text_content:
+                financial = extract_financial_data(attachment.text_content, classification.filename)
+                if financial:
+                    memory_manager.add_financial_record(
+                        vendor=financial["vendor"],
+                        amount=financial["amount"],
+                        currency=financial["currency"],
+                        category=financial["category"],
+                        date=financial["date"],
+                        description=classification.summary,
+                        drive_file_id=drive_file_id,
+                        source="email",
+                    )
+
             logger.info(
                 "Filed attachment '%s' -> %s/%s (Drive ID: %s)",
                 attachment.filename,
@@ -73,12 +124,49 @@ def _handle_email(email, memory_manager, drive_client):
                 classification.sub_folder,
                 drive_file_id,
             )
-        except Exception:
+            filed_attachments.append(
+                {
+                    "original_filename": attachment.filename,
+                    "stored_filename": classification.filename,
+                    "top_level": classification.top_level,
+                    "sub_folder": classification.sub_folder,
+                    "drive_file_id": drive_file_id,
+                }
+            )
+        except Exception as e:
             logger.exception("Failed to file attachment: %s", attachment.filename)
+            failed_attachments.append(
+                {
+                    "filename": attachment.filename,
+                    "error": str(e),
+                }
+            )
+
+    if filed_attachments and failed_attachments:
+        _record_gmail_activity(
+            email,
+            "partial",
+            reason,
+            {"filed_attachments": filed_attachments, "failed_attachments": failed_attachments},
+        )
+    elif filed_attachments:
+        _record_gmail_activity(
+            email,
+            "filed",
+            reason,
+            {"filed_attachments": filed_attachments},
+        )
+    else:
+        _record_gmail_activity(
+            email,
+            "failed",
+            reason,
+            {"failed_attachments": failed_attachments},
+        )
 
 
 def main():
-    logger.info("Starting Jarvis...")
+    logger.info("Starting Marvis...")
 
     # Memory
     from memory.manager import MemoryManager
@@ -91,9 +179,22 @@ def main():
     drive_client.init_drive_structure()
     logger.info("Drive client initialised")
 
+    # Calendar
+    from calendar_api.client import CalendarClient
+    try:
+        calendar_client = CalendarClient()
+        logger.info("Calendar client initialised")
+    except Exception:
+        logger.warning("Calendar client failed to initialise — calendar features disabled")
+        calendar_client = None
+
     # Agent
     from core.agent import JarvisAgent
-    agent = JarvisAgent(memory_manager=memory_manager, drive_client=drive_client)
+    agent = JarvisAgent(
+        memory_manager=memory_manager,
+        drive_client=drive_client,
+        calendar_client=calendar_client,
+    )
     logger.info("Agent initialised")
 
     # Gmail watcher (background thread)
@@ -108,8 +209,13 @@ def main():
     logger.info("Gmail watcher started in background thread")
 
     # Telegram bot (blocks main thread)
-    from telegram.bot import TelegramBot
-    bot = TelegramBot(agent=agent, memory_manager=memory_manager, drive_client=drive_client)
+    from telegram_bot.bot import TelegramBot
+    bot = TelegramBot(
+        agent=agent,
+        memory_manager=memory_manager,
+        drive_client=drive_client,
+        calendar_client=calendar_client,
+    )
     bot.run()
 
 

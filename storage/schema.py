@@ -1,6 +1,6 @@
 """
 Drive folder schema constants and the classification prompt used by the Agent SDK filer.
-Top-level folders are fixed. Sub-folders within each are managed by Claude as needed.
+Top-level folders are fixed. Sub-folders within each are managed by the configured model as needed.
 """
 
 # Top-level folder name under which all Jarvis files live
@@ -34,6 +34,14 @@ FILENAME_PATTERN_DESCRIPTION = (
 CLASSIFICATION_PROMPT = """\
 You are a document classifier. You will be given a file and must determine where it \
 belongs in a structured Google Drive library.
+
+Documents may be in English or German. Classify them correctly regardless of language. \
+Common German document terms: Rechnung (invoice), Vertrag (contract), \
+Versicherung (insurance), Krankenversicherung (health insurance), \
+Mietvertrag (rental agreement), Steuerbescheid (tax notice), \
+Kontoauszug (bank statement), Bescheinigung (certificate), \
+Kfz (vehicle), Mahnung (reminder/dunning notice), Quittung (receipt). \
+Always respond in English.
 
 Top-level folders (you MUST pick one of these exactly):
 {top_level_folders}

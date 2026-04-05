@@ -1,0 +1,1326 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Marvis docs</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0e0e10;
+      --surface: #1c1c21;
+      --surface-2: #151518;
+      --border: #2b2b31;
+      --text: #f0f0f0;
+      --muted: #9ca3af;
+      --accent: #00ff9f;
+      --accent-2: #00e0ff;
+      --warn: #f59e0b;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.55 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+    a { color: var(--accent-2); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .wrap {
+      max-width: 1220px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 16px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 18px;
+    }
+    h1, h2, h3, p { margin: 0; }
+    h1 { font-size: 20px; font-weight: 600; }
+    h2 { font-size: 16px; font-weight: 600; margin-bottom: 10px; }
+    h3 { font-size: 14px; font-weight: 600; margin-bottom: 8px; }
+    .muted { color: var(--muted); }
+    .topline {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 16px;
+      color: var(--muted);
+    }
+    .topline code, .note code, .panel code, .setup code {
+      color: #d1d5db;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      padding: 1px 5px;
+    }
+    .tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 18px;
+    }
+    .tab {
+      appearance: none;
+      border: 0;
+      background: transparent;
+      padding: 0 0 4px;
+      color: var(--muted);
+      cursor: pointer;
+      font: inherit;
+      border-bottom: 1px solid transparent;
+    }
+    .tab.active {
+      color: var(--text);
+      border-bottom-color: var(--accent);
+    }
+    .panel {
+      display: none;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      padding: 16px;
+      margin-bottom: 12px;
+    }
+    .panel.active { display: block; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .box {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      padding: 12px;
+      min-height: 84px;
+    }
+    .stack { display: grid; gap: 10px; }
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 10px;
+      align-items: stretch;
+    }
+    .flow.compact { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .node, .leaf {
+      border: 1px solid var(--border);
+      background: #111214;
+      padding: 10px 12px;
+      min-height: 72px;
+    }
+    .node strong, .leaf strong { display: block; margin-bottom: 4px; }
+    .arrow {
+      display: grid;
+      place-items: center;
+      color: var(--accent);
+      font-size: 18px;
+      line-height: 1;
+      padding: 0 2px;
+    }
+    .diagram-note {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    ul, ol { margin: 8px 0 0; padding-left: 20px; }
+    li + li { margin-top: 6px; }
+    .table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 10px;
+    }
+    .table th, .table td {
+      text-align: left;
+      vertical-align: top;
+      padding: 8px 10px 8px 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .table th { color: var(--muted); font-weight: 500; width: 160px; }
+    .callout {
+      border-left: 2px solid var(--warn);
+      padding-left: 12px;
+      color: var(--muted);
+      margin-top: 12px;
+    }
+    .note {
+      margin-top: 12px;
+      padding: 12px;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+    }
+    .kbd {
+      display: inline-block;
+      border: 1px solid var(--border);
+      background: #111214;
+      padding: 1px 6px;
+      margin: 0 2px;
+    }
+    .section-link {
+      display: inline-block;
+      margin-right: 12px;
+      margin-top: 6px;
+    }
+    .architecture-intro {
+      color: var(--muted);
+      max-width: 92ch;
+      margin-bottom: 12px;
+    }
+    .scenario-tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .scenario-tab {
+      appearance: none;
+      border: 1px solid var(--border);
+      background: #111214;
+      color: var(--muted);
+      cursor: pointer;
+      font: inherit;
+      padding: 8px 10px;
+      transition: border-color 0.2s ease, color 0.2s ease, background 0.2s ease, transform 0.2s ease;
+    }
+    .scenario-tab:hover,
+    .scenario-tab:focus-visible {
+      color: var(--text);
+      border-color: var(--accent-2);
+      outline: none;
+      transform: translateY(-1px);
+    }
+    .scenario-tab.active {
+      color: var(--text);
+      border-color: var(--accent);
+      background: linear-gradient(180deg, rgba(0, 255, 159, 0.12), rgba(0, 224, 255, 0.06));
+      box-shadow: inset 0 0 0 1px rgba(0, 255, 159, 0.16);
+    }
+    .architecture-shell {
+      margin-top: 12px;
+    }
+    .architecture-caption {
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .architecture-scroll {
+      overflow-x: auto;
+      padding-bottom: 6px;
+      margin-top: 12px;
+    }
+    .architecture-map {
+      position: relative;
+      min-width: 1080px;
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 12px;
+      padding: 2px;
+    }
+    .architecture-lane {
+      position: relative;
+      z-index: 1;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      padding: 12px;
+      min-height: 372px;
+    }
+    .lane-label {
+      color: var(--muted);
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      margin-bottom: 10px;
+      text-transform: uppercase;
+    }
+    .lane-stack {
+      display: grid;
+      gap: 10px;
+    }
+    .arch-node {
+      display: block;
+      width: 100%;
+      text-align: left;
+      border: 1px solid var(--border);
+      background: #111214;
+      color: var(--text);
+      cursor: pointer;
+      font: inherit;
+      min-height: 82px;
+      padding: 10px 12px;
+      position: relative;
+      transition: border-color 0.2s ease, background 0.2s ease, box-shadow 0.2s ease, opacity 0.2s ease, transform 0.2s ease;
+    }
+    .arch-node:hover,
+    .arch-node:focus-visible {
+      border-color: var(--accent-2);
+      outline: none;
+      transform: translateY(-1px);
+    }
+    .arch-node strong {
+      display: block;
+      margin-bottom: 4px;
+    }
+    .arch-node span:last-child {
+      color: var(--muted);
+      display: block;
+    }
+    .node-kicker {
+      color: var(--accent-2);
+      display: block;
+      font-size: 12px;
+      letter-spacing: 0.06em;
+      margin-bottom: 6px;
+      text-transform: uppercase;
+    }
+    .arch-node.is-active {
+      background: linear-gradient(180deg, rgba(0, 255, 159, 0.10), rgba(0, 224, 255, 0.04));
+      border-color: var(--accent);
+      box-shadow: 0 0 0 1px rgba(0, 255, 159, 0.14);
+    }
+    .arch-node.is-inspected {
+      border-color: var(--accent-2);
+      box-shadow: 0 0 0 1px rgba(0, 224, 255, 0.18);
+    }
+    .arch-node.is-dim {
+      opacity: 0.42;
+    }
+    .arch-edge-layer {
+      inset: 0;
+      overflow: visible;
+      pointer-events: none;
+      position: absolute;
+      z-index: 0;
+    }
+    .arch-edge {
+      fill: none;
+      opacity: 0.28;
+      stroke: rgba(156, 163, 175, 0.22);
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      stroke-width: 2;
+      transition: opacity 0.2s ease, stroke 0.2s ease, stroke-width 0.2s ease, filter 0.2s ease;
+    }
+    .arch-edge.is-active {
+      animation: dashFlow 14s linear infinite;
+      filter: drop-shadow(0 0 4px rgba(0, 255, 159, 0.24));
+      opacity: 0.96;
+      stroke: var(--accent);
+      stroke-dasharray: 7 7;
+      stroke-width: 2.6;
+    }
+    .arch-edge.is-inspected {
+      filter: drop-shadow(0 0 4px rgba(0, 224, 255, 0.22));
+      opacity: 1;
+      stroke: var(--accent-2);
+      stroke-width: 3;
+    }
+    .arch-edge.is-dim {
+      opacity: 0.08;
+    }
+    @keyframes dashFlow {
+      to { stroke-dashoffset: -28; }
+    }
+    .architecture-meta {
+      display: grid;
+      gap: 12px;
+      grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.95fr);
+      margin-top: 12px;
+    }
+    .story-summary {
+      color: var(--muted);
+    }
+    .story-steps {
+      margin-top: 10px;
+    }
+    .story-note {
+      color: var(--muted);
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid var(--border);
+    }
+    .source-grid {
+      display: grid;
+      gap: 10px;
+      margin-top: 10px;
+    }
+    .source-card {
+      background: #111214;
+      border: 1px solid var(--border);
+      padding: 10px 12px;
+    }
+    .source-card strong {
+      display: block;
+      margin-bottom: 4px;
+    }
+    .source-card code {
+      display: inline-block;
+      margin-top: 6px;
+    }
+    .source-card p {
+      color: var(--muted);
+    }
+    .route-flow {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 12px;
+    }
+    .route-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 12px;
+    }
+    .route-card {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      padding: 12px;
+    }
+    .route-tag {
+      display: inline-block;
+      margin-bottom: 8px;
+      padding: 2px 8px;
+      border: 1px solid var(--border);
+      background: #111214;
+      color: var(--accent-2);
+      font-size: 12px;
+    }
+    .route-card p {
+      color: var(--muted);
+    }
+    .route-card code {
+      display: inline-block;
+      margin-top: 8px;
+    }
+    @media (max-width: 980px) {
+      .grid, .flow, .flow.compact { grid-template-columns: 1fr; }
+      .arrow { transform: rotate(90deg); min-height: 18px; }
+      header { align-items: flex-start; flex-direction: column; }
+      .wrap { padding: 16px; }
+      .table th { width: 120px; }
+      .architecture-meta, .route-grid { grid-template-columns: 1fr; }
+      .route-flow { grid-template-columns: 1fr; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      .scenario-tab,
+      .arch-node,
+      .arch-edge {
+        animation: none;
+        transition: none;
+      }
+      .arch-edge.is-active {
+        stroke-dasharray: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div>
+        <h1>Marvis docs</h1>
+        <div class="muted">Marvis is the local assistant that watches Gmail, files documents, keeps memory, and talks over Telegram.</div>
+      </div>
+      <div class="muted">Standalone file: <code>docs/index.html</code></div>
+    </header>
+
+    <div class="topline">
+      <span>Open dashboard: <a href="http://127.0.0.1:8080/">127.0.0.1:8080</a></span>
+      <span>Docs route: <a href="http://127.0.0.1:8080/docs">/docs</a></span>
+    </div>
+
+    <div class="tabs" role="tablist" aria-label="Marvis documentation sections">
+      <button class="tab active" type="button" data-target="overview">Overview</button>
+      <button class="tab" type="button" data-target="setup">Setup</button>
+      <button class="tab" type="button" data-target="telegram">Telegram</button>
+      <button class="tab" type="button" data-target="gmail">Gmail</button>
+      <button class="tab" type="button" data-target="architecture">Architecture</button>
+      <button class="tab" type="button" data-target="routing">Routing</button>
+    </div>
+
+    <section class="panel active" id="overview" data-panel>
+      <h2>What Marvis does</h2>
+      <div class="grid">
+        <div class="box">
+          <h3>Assistant loop</h3>
+          <p>Marvis answers Telegram messages through the agent loop, with memory, Drive search, calendar, task, and financial tools available when needed.</p>
+        </div>
+        <div class="box">
+          <h3>Background watcher</h3>
+          <p>It polls Gmail on a timer, decides whether a message is worth filing, extracts attachments, classifies them, and stores them in Drive plus memory.</p>
+        </div>
+      </div>
+
+      <div class="note">
+        <strong>Quick map</strong>
+        <div class="flow" style="margin-top:10px">
+          <div class="node"><strong>Telegram</strong><span>chat, commands, file uploads</span></div>
+          <div class="arrow">→</div>
+          <div class="node"><strong>Core agent</strong><span><code>core/agent.py</code></span></div>
+          <div class="arrow">→</div>
+          <div class="node"><strong>Tools</strong><span>memory, Drive, calendar, tasks</span></div>
+        </div>
+        <div class="flow compact" style="margin-top:12px">
+          <div class="leaf"><strong>Gmail watcher</strong><span>polls unread mail, files attachments</span></div>
+          <div class="leaf"><strong>OpenRouter</strong><span>model calls stay Anthropic-shaped</span></div>
+          <div class="leaf"><strong>SQLite + ChromaDB</strong><span>memory, tasks, financial records</span></div>
+        </div>
+      </div>
+
+      <div class="callout">
+        Some internal filenames still use `jarvis` for the moment, but the app name shown in the docs and UI is Marvis.
+      </div>
+    </section>
+
+    <section class="panel" id="setup" data-panel>
+      <h2>Setup and how to run</h2>
+      <ol>
+        <li>Install Python 3.12, create a virtual environment, and install the requirements.</li>
+        <li>Copy <code>.env.example</code> to <code>.env</code> and fill in OpenRouter, Telegram, and Google credentials.</li>
+        <li>Create Google OAuth credentials with Gmail, Drive, and Calendar scopes, then authorize once so <code>token.json</code> is created.</li>
+        <li>Start the app with <code>python main.py</code>.</li>
+        <li>Open the dashboard at <code>http://127.0.0.1:8080/</code> and this docs page at <code>/docs</code>.</li>
+      </ol>
+
+      <table class="table" aria-label="Key environment variables">
+        <tr><th>OpenRouter</th><td><code>OPENROUTER_API_KEY</code>, <code>OPENROUTER_MODEL</code>, optional task-specific model overrides</td></tr>
+        <tr><th>Telegram</th><td><code>TELEGRAM_BOT_TOKEN</code>, <code>TELEGRAM_ALLOWED_USER_ID</code></td></tr>
+        <tr><th>Google</th><td><code>GOOGLE_CREDENTIALS_PATH</code>, <code>GOOGLE_TOKEN_PATH</code></td></tr>
+        <tr><th>Runtime</th><td><code>GMAIL_POLL_INTERVAL</code>, <code>GMAIL_START_DATE</code>, <code>JARVIS_TIMEZONE</code></td></tr>
+      </table>
+
+      <div class="note">
+        <strong>Useful commands</strong>
+        <div style="margin-top:8px">
+          <div><code>python main.py</code> - run Marvis</div>
+          <div><code>python -m dashboard</code> - run the local dashboard only</div>
+          <div><code>http://127.0.0.1:8080/docs</code> - open these docs in the browser</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel" id="telegram" data-panel>
+      <h2>Telegram usage</h2>
+      <div class="flow compact">
+        <div class="leaf"><strong>User message</strong><span>plain text goes into the agent loop</span></div>
+        <div class="leaf"><strong>Commands</strong><span><code>/status</code>, <code>/memories</code>, <code>/forget</code>, <code>/reset</code></span></div>
+        <div class="leaf"><strong>Uploads</strong><span>documents and photos are filed to Drive</span></div>
+      </div>
+
+      <table class="table" aria-label="Telegram commands">
+        <tr><th>Any text</th><td>Passed to the agent as a normal chat message.</td></tr>
+        <tr><th><code>/memories</code></th><td>Lists stored memories grouped by category.</td></tr>
+        <tr><th><code>/forget &lt;topic&gt;</code></th><td>Deletes a memory by topic.</td></tr>
+        <tr><th><code>/reset</code></th><td>Clears conversation history only. Long-term memory stays intact.</td></tr>
+        <tr><th><code>/status</code></th><td>Shows memory count, Drive state, Calendar state, and current model.</td></tr>
+      </table>
+
+      <div class="note">
+        Telegram is single-user by design: the bot only accepts messages from the configured allowed user ID.
+      </div>
+    </section>
+
+    <section class="panel" id="gmail" data-panel>
+      <h2>Gmail watcher behavior</h2>
+      <div class="flow">
+        <div class="node"><strong>1. Poll</strong><span>reads unread mail every <code>GMAIL_POLL_INTERVAL</code> seconds</span></div>
+        <div class="arrow">→</div>
+        <div class="node"><strong>2. Parse</strong><span>extracts text, metadata, and attachments</span></div>
+        <div class="arrow">→</div>
+        <div class="node"><strong>3. Relevance</strong><span>skips newsletters, OTPs, and noisy notifications</span></div>
+        <div class="arrow">→</div>
+        <div class="node"><strong>4. File</strong><span>classify attachment, upload to Drive, write memory</span></div>
+      </div>
+
+      <table class="table" aria-label="Gmail watcher files">
+        <tr><th>State</th><td><code>data/gmail_state.txt</code> keeps the last processed message id and cutoff date.</td></tr>
+        <tr><th>Activity</th><td><code>data/gmail_activity.jsonl</code> captures filed, skipped, partial, and failed outcomes.</td></tr>
+        <tr><th>Logs</th><td><code>logs/jarvis.log</code> records watcher activity and filing decisions.</td></tr>
+      </table>
+
+      <div class="callout">
+        If the relevance or filing step fails, Marvis should lean toward not losing a document. The watcher is built around preserving useful mail, not silently discarding it.
+      </div>
+    </section>
+
+    <section class="panel" id="architecture" data-panel>
+      <h2>Interactive architecture flow</h2>
+      <p class="architecture-intro">Switch scenarios to trace how information moves across inputs, agents, tools and APIs, storage layers, and user-facing outputs. The same shared map powers chat, uploads, Gmail filing, document Q&amp;A, and calendar or task requests.</p>
+
+      <div class="note">
+        <strong>Accuracy note</strong>
+        <p style="margin-top:8px">Only <code>JarvisAgent</code> is a long-lived runtime object. The Relevance, Classification, Vision, and Financial agents are specialized LLM-driven stages in the pipeline, documented here as agents so the hand-offs are easier to follow at a glance.</p>
+      </div>
+
+      <div class="architecture-shell" data-architecture>
+        <div class="scenario-tabs" role="tablist" aria-label="Architecture scenarios">
+          <button class="scenario-tab active" type="button" data-scenario="telegram-chat">Telegram chat</button>
+          <button class="scenario-tab" type="button" data-scenario="telegram-upload">Telegram upload</button>
+          <button class="scenario-tab" type="button" data-scenario="gmail-filing">Gmail filing</button>
+          <button class="scenario-tab" type="button" data-scenario="drive-qa">Drive Q&amp;A</button>
+          <button class="scenario-tab" type="button" data-scenario="calendar-tasks">Calendar &amp; tasks</button>
+        </div>
+        <div class="architecture-caption">Default scenario: Telegram chat. Hover any highlighted node to inspect it, and on narrow screens scroll sideways to keep the five-lane map intact.</div>
+        <div class="architecture-caption" id="architecture-inspect">Path focus changes on hover.</div>
+
+        <div class="architecture-scroll">
+          <div class="architecture-map" data-architecture-map>
+            <svg class="arch-edge-layer" data-architecture-edges aria-hidden="true"></svg>
+
+            <div class="architecture-lane">
+              <div class="lane-label">Inputs</div>
+              <div class="lane-stack">
+                <button class="arch-node" type="button" data-node="input-telegram-chat">
+                  <span class="node-kicker">Input</span>
+                  <strong>Telegram chat</strong>
+                  <span>Plain text, commands, and document questions arriving through <code>telegram_bot/bot.py</code>.</span>
+                </button>
+                <button class="arch-node" type="button" data-node="input-telegram-upload">
+                  <span class="node-kicker">Input</span>
+                  <strong>Telegram upload</strong>
+                  <span>Files and photos enter the filing path before a confirmation goes back to the user.</span>
+                </button>
+                <button class="arch-node" type="button" data-node="input-gmail-watcher">
+                  <span class="node-kicker">Input</span>
+                  <strong>Gmail watcher</strong>
+                  <span>Unread mail is polled in the background by <code>gmail/watcher.py</code>.</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="architecture-lane">
+              <div class="lane-label">Agents</div>
+              <div class="lane-stack">
+                <button class="arch-node" type="button" data-node="agent-chat">
+                  <span class="node-kicker">Agent</span>
+                  <strong>Chat Agent</strong>
+                  <span><code>JarvisAgent</code> runs the Anthropic-style tool loop and assembles the final reply.</span>
+                </button>
+                <button class="arch-node" type="button" data-node="agent-relevance">
+                  <span class="node-kicker">Agent</span>
+                  <strong>Relevance Agent</strong>
+                  <span>Scores incoming mail and decides whether the filing pipeline should continue.</span>
+                </button>
+                <button class="arch-node" type="button" data-node="agent-classification">
+                  <span class="node-kicker">Agent</span>
+                  <strong>Classification Agent</strong>
+                  <span>Chooses the Drive path, normalized filename, and short summary for each document.</span>
+                </button>
+                <button class="arch-node" type="button" data-node="agent-vision">
+                  <span class="node-kicker">Agent</span>
+                  <strong>Vision Agent</strong>
+                  <span>Describes image-heavy documents when standard text extraction is not enough.</span>
+                </button>
+                <button class="arch-node" type="button" data-node="agent-financial">
+                  <span class="node-kicker">Agent</span>
+                  <strong>Financial Agent</strong>
+                  <span>Extracts vendor, amount, category, and date from finance-oriented documents.</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="architecture-lane">
+              <div class="lane-label">Tools / APIs</div>
+              <div class="lane-stack">
+                <button class="arch-node" type="button" data-node="tool-openrouter">
+                  <span class="node-kicker">Runtime</span>
+                  <strong>OpenRouter routing</strong>
+                  <span><code>core/llm_client.py</code> keeps Anthropic-shaped requests while selecting task-specific models.</span>
+                </button>
+                <button class="arch-node" type="button" data-node="tool-parser">
+                  <span class="node-kicker">Tooling</span>
+                  <strong>Parser &amp; extraction</strong>
+                  <span><code>gmail/parser.py</code> and <code>utils/text_extraction.py</code> turn mail and files into usable text.</span>
+                </button>
+                <button class="arch-node" type="button" data-node="tool-agent-tools">
+                  <span class="node-kicker">Tooling</span>
+                  <strong>Local tools &amp; managers</strong>
+                  <span>Memory updates, task operations, and Drive or calendar helpers coordinated by the chat loop and upload handlers.</span>
+                </button>
+                <button class="arch-node" type="button" data-node="tool-google-clients">
+                  <span class="node-kicker">API layer</span>
+                  <strong>Google clients</strong>
+                  <span>Drive, Calendar, and Gmail client adapters handle upload, query, and OAuth-backed API calls.</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="architecture-lane">
+              <div class="lane-label">Storage</div>
+              <div class="lane-stack">
+                <button class="arch-node" type="button" data-node="storage-memory">
+                  <span class="node-kicker">Storage</span>
+                  <strong>SQLite + ChromaDB</strong>
+                  <span>Memories, tasks, financial records, and semantic recall stay local under <code>memory/manager.py</code>.</span>
+                </button>
+                <button class="arch-node" type="button" data-node="storage-drive">
+                  <span class="node-kicker">Storage</span>
+                  <strong>Google Drive library</strong>
+                  <span>Filed documents land under the managed Jarvis root with model-selected folders and filenames.</span>
+                </button>
+                <button class="arch-node" type="button" data-node="storage-calendar">
+                  <span class="node-kicker">Storage</span>
+                  <strong>Calendar state</strong>
+                  <span>Google Calendar events are queried or created after relative dates are resolved locally.</span>
+                </button>
+                <button class="arch-node" type="button" data-node="storage-activity">
+                  <span class="node-kicker">Storage</span>
+                  <strong>Watcher activity</strong>
+                  <span><code>data/gmail_state.txt</code> and <code>data/gmail_activity.jsonl</code> capture progress and outcomes.</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="architecture-lane">
+              <div class="lane-label">Outputs</div>
+              <div class="lane-stack">
+                <button class="arch-node" type="button" data-node="output-telegram-reply">
+                  <span class="node-kicker">Output</span>
+                  <strong>Telegram reply</strong>
+                  <span>Answers, resolved dates, Drive summaries, and task updates go back to the chat.</span>
+                </button>
+                <button class="arch-node" type="button" data-node="output-confirmation">
+                  <span class="node-kicker">Output</span>
+                  <strong>Filing confirmation</strong>
+                  <span>The user sees where a Telegram upload was stored and the generated summary.</span>
+                </button>
+                <button class="arch-node" type="button" data-node="output-watcher">
+                  <span class="node-kicker">Output</span>
+                  <strong>Watcher update</strong>
+                  <span>Gmail activity is recorded as filed, skipped, partial, or failed for later inspection.</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="architecture-meta">
+          <div class="box">
+            <h3 id="architecture-story-title">Telegram chat</h3>
+            <p class="story-summary" id="architecture-story-summary"></p>
+            <ol class="story-steps" id="architecture-story-steps"></ol>
+            <div class="story-note" id="architecture-story-note"></div>
+          </div>
+          <div class="box">
+            <h3>Source trail</h3>
+            <p class="story-summary">These are the primary files touched by the currently selected scenario.</p>
+            <div class="source-grid" id="architecture-sources"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel" id="routing" data-panel>
+      <h2>Model routing companion</h2>
+      <p class="architecture-intro">This is the shared model layer underneath the architecture map. Every agent or specialist stage uses the same Anthropic-shaped client, then selects a task-specific override when one is configured.</p>
+
+      <div class="note">
+        <strong>Route spine</strong>
+        <div class="route-flow">
+          <div class="leaf"><strong>Agent or stage</strong><span>Chat, relevance, classification, vision, or financial extraction initiates a request.</span></div>
+          <div class="leaf"><strong>Model selector</strong><span><code>core/llm_client.py</code> resolves a task-specific model or the default model.</span></div>
+          <div class="leaf"><strong>OpenRouter client</strong><span>Anthropic SDK calls OpenRouter with Anthropic-style messages and tool definitions.</span></div>
+          <div class="leaf"><strong>Validated result</strong><span>The result becomes text, structured JSON, extracted document text, or a tool-aware answer.</span></div>
+        </div>
+      </div>
+
+      <div class="route-grid">
+        <div class="route-card">
+          <div class="route-tag">Chat Agent</div>
+          <h3>Default conversation routing</h3>
+          <p>General reasoning and tool use go through <code>OPENROUTER_MODEL</code> inside the long-lived chat loop.</p>
+          <code>core/agent.py</code>
+        </div>
+        <div class="route-card">
+          <div class="route-tag">Relevance Agent</div>
+          <h3>Mail triage routing</h3>
+          <p><code>OPENROUTER_MODEL_RELEVANCE</code> can specialize the Gmail filing decision. If validation fails, the system files the email rather than risking data loss.</p>
+          <code>gmail/relevance.py</code>
+        </div>
+        <div class="route-card">
+          <div class="route-tag">Classification Agent</div>
+          <h3>Document filing routing</h3>
+          <p><code>OPENROUTER_MODEL_CLASSIFICATION</code> chooses the folder, filename, and summary, with fallback to the default model when the structured output drifts.</p>
+          <code>agent_sdk/filer.py</code>
+        </div>
+        <div class="route-card">
+          <div class="route-tag">Vision Agent</div>
+          <h3>Image description routing</h3>
+          <p><code>OPENROUTER_MODEL_VISION</code> is used for image-heavy documents and screenshots when OCR-style extraction needs multimodal help.</p>
+          <code>utils/text_extraction.py</code>
+        </div>
+        <div class="route-card">
+          <div class="route-tag">Financial Agent</div>
+          <h3>Financial extraction routing</h3>
+          <p><code>OPENROUTER_MODEL_FINANCIAL</code> can specialize receipt and invoice parsing, with strict JSON validation before records are stored.</p>
+          <code>utils/financial_extraction.py</code>
+        </div>
+        <div class="route-card">
+          <div class="route-tag">Shared guardrails</div>
+          <h3>Structured validation and auth</h3>
+          <p><code>core/structured_output.py</code> validates structured responses, while the client clears ambient <code>ANTHROPIC_API_KEY</code> so OpenRouter stays the only auth path.</p>
+          <code>core/structured_output.py</code>
+        </div>
+      </div>
+
+      <div class="callout">
+        Structured-output paths are where most of the routing discipline lives. Relevance and financial extraction fail safely, while classification can retry through the default model when a task-specific route returns invalid JSON.
+      </div>
+    </section>
+
+    <div class="note">
+      <strong>Open locally</strong>
+      <div style="margin-top:8px">
+        <div>Best path: run <code>python -m dashboard</code> and open <code>http://127.0.0.1:8080/docs</code>.</div>
+        <div>Standalone path: open <code>docs/index.html</code> directly if you only need the static page.</div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    (() => {
+      const tabs = Array.from(document.querySelectorAll(".tab"));
+      const panels = Array.from(document.querySelectorAll("[data-panel]"));
+      const architecture = document.querySelector("[data-architecture]");
+      const scenarioButtons = Array.from(document.querySelectorAll("[data-scenario]"));
+      const map = architecture ? architecture.querySelector("[data-architecture-map]") : null;
+      const edgeLayer = architecture ? architecture.querySelector("[data-architecture-edges]") : null;
+      const inspectLabel = document.getElementById("architecture-inspect");
+      const storyTitle = document.getElementById("architecture-story-title");
+      const storySummary = document.getElementById("architecture-story-summary");
+      const storySteps = document.getElementById("architecture-story-steps");
+      const storyNote = document.getElementById("architecture-story-note");
+      const sourceGrid = document.getElementById("architecture-sources");
+      const nodeElements = new Map(
+        Array.from(document.querySelectorAll("[data-node]")).map((node) => [node.dataset.node, node])
+      );
+
+      const nodeDetails = new Map(
+        Array.from(nodeElements.entries()).map(([id, node]) => {
+          const title = node.querySelector("strong")?.textContent || id;
+          const detail = node.querySelector("span:last-child")?.textContent || "";
+          return [id, { title, detail }];
+        })
+      );
+
+      const edgeDefs = [
+        { id: "input-chat-agent", from: "input-telegram-chat", to: "agent-chat" },
+        { id: "chat-openrouter", from: "agent-chat", to: "tool-openrouter" },
+        { id: "openrouter-chat", from: "tool-openrouter", to: "agent-chat" },
+        { id: "chat-tools", from: "agent-chat", to: "tool-agent-tools" },
+        { id: "tools-memory", from: "tool-agent-tools", to: "storage-memory" },
+        { id: "tools-drive", from: "tool-agent-tools", to: "storage-drive" },
+        { id: "tools-calendar", from: "tool-agent-tools", to: "storage-calendar" },
+        { id: "memory-chat", from: "storage-memory", to: "agent-chat" },
+        { id: "drive-chat", from: "storage-drive", to: "agent-chat" },
+        { id: "calendar-chat", from: "storage-calendar", to: "agent-chat" },
+        { id: "chat-output", from: "agent-chat", to: "output-telegram-reply" },
+        { id: "input-upload-parser", from: "input-telegram-upload", to: "tool-parser" },
+        { id: "parser-vision", from: "tool-parser", to: "agent-vision" },
+        { id: "vision-openrouter", from: "agent-vision", to: "tool-openrouter" },
+        { id: "openrouter-vision", from: "tool-openrouter", to: "agent-vision" },
+        { id: "parser-classification", from: "tool-parser", to: "agent-classification" },
+        { id: "classification-openrouter", from: "agent-classification", to: "tool-openrouter" },
+        { id: "openrouter-classification", from: "tool-openrouter", to: "agent-classification" },
+        { id: "classification-google", from: "agent-classification", to: "tool-google-clients" },
+        { id: "classification-tools", from: "agent-classification", to: "tool-agent-tools" },
+        { id: "google-drive", from: "tool-google-clients", to: "storage-drive" },
+        { id: "parser-financial", from: "tool-parser", to: "agent-financial" },
+        { id: "financial-openrouter", from: "agent-financial", to: "tool-openrouter" },
+        { id: "openrouter-financial", from: "tool-openrouter", to: "agent-financial" },
+        { id: "financial-tools", from: "agent-financial", to: "tool-agent-tools" },
+        { id: "drive-confirmation", from: "storage-drive", to: "output-confirmation" },
+        { id: "memory-confirmation", from: "storage-memory", to: "output-confirmation" },
+        { id: "input-gmail-google", from: "input-gmail-watcher", to: "tool-google-clients" },
+        { id: "google-parser", from: "tool-google-clients", to: "tool-parser" },
+        { id: "parser-relevance", from: "tool-parser", to: "agent-relevance" },
+        { id: "relevance-openrouter", from: "agent-relevance", to: "tool-openrouter" },
+        { id: "openrouter-relevance", from: "tool-openrouter", to: "agent-relevance" },
+        { id: "relevance-classification", from: "agent-relevance", to: "agent-classification" },
+        { id: "google-activity", from: "tool-google-clients", to: "storage-activity" },
+        { id: "activity-output", from: "storage-activity", to: "output-watcher" },
+        { id: "tools-google", from: "tool-agent-tools", to: "tool-google-clients" },
+        { id: "drive-parser", from: "storage-drive", to: "tool-parser" },
+        { id: "parser-chat", from: "tool-parser", to: "agent-chat" },
+      ];
+      const edgeDefsById = new Map(edgeDefs.map((edge) => [edge.id, edge]));
+      let edgeElements = new Map();
+
+      const scenarios = {
+        "telegram-chat": {
+          title: "Telegram chat",
+          summary: "Plain-text requests enter the long-lived Chat Agent, which builds a memory-backed prompt, decides whether tools are needed, and returns a Telegram reply.",
+          note: "The highlighted path shows the full tool envelope the Chat Agent can reach. A specific turn may use only a subset of these branches.",
+          nodes: [
+            "input-telegram-chat",
+            "agent-chat",
+            "tool-openrouter",
+            "tool-agent-tools",
+            "storage-memory",
+            "storage-drive",
+            "storage-calendar",
+            "output-telegram-reply",
+          ],
+          edges: [
+            "input-chat-agent",
+            "chat-openrouter",
+            "openrouter-chat",
+            "chat-tools",
+            "tools-memory",
+            "tools-drive",
+            "tools-calendar",
+            "memory-chat",
+            "drive-chat",
+            "calendar-chat",
+            "chat-output",
+          ],
+          steps: [
+            "Telegram text reaches `JarvisAgent.chat(...)` through the single-user bot handler.",
+            "The system prompt pulls in semantically relevant memories plus local time context before the model call.",
+            "The Chat Agent loops through OpenRouter, optionally calling local tools and managers for memory, Drive, calendar, or tasks.",
+            "Tool results re-enter the loop, and the final answer is sent back as a Telegram reply.",
+          ],
+          sources: [
+            { label: "Telegram ingress", path: "telegram_bot/bot.py", detail: "Routes plain-text messages to the chat loop." },
+            { label: "Chat loop", path: "core/agent.py", detail: "Runs Anthropic-style tool calls and response assembly." },
+            { label: "Prompt builder", path: "core/prompts.py", detail: "Injects relevant memories and time context into the system prompt." },
+            { label: "Local storage", path: "memory/manager.py", detail: "Persists memories, tasks, and financial records in SQLite and ChromaDB." },
+          ],
+        },
+        "telegram-upload": {
+          title: "Telegram upload",
+          summary: "Files and photos bypass the chat loop, move through extraction and specialist agents, and finish with Drive storage, memory updates, and a filing confirmation.",
+          note: "Telegram uploads reuse the same model routing and storage helpers, but they do not instantiate the long-lived Chat Agent.",
+          nodes: [
+            "input-telegram-upload",
+            "tool-parser",
+            "agent-vision",
+            "tool-openrouter",
+            "agent-classification",
+            "tool-google-clients",
+            "storage-drive",
+            "tool-agent-tools",
+            "storage-memory",
+            "agent-financial",
+            "output-confirmation",
+          ],
+          edges: [
+            "input-upload-parser",
+            "parser-vision",
+            "vision-openrouter",
+            "openrouter-vision",
+            "parser-classification",
+            "classification-openrouter",
+            "openrouter-classification",
+            "classification-google",
+            "google-drive",
+            "classification-tools",
+            "tools-memory",
+            "parser-financial",
+            "financial-openrouter",
+            "openrouter-financial",
+            "financial-tools",
+            "drive-confirmation",
+            "memory-confirmation",
+          ],
+          steps: [
+            "The Telegram upload handler downloads the file and extracts text when the format supports it.",
+            "If the upload is image-heavy, the Vision Agent adds a richer description before classification.",
+            "The Classification Agent chooses the Drive folder, output filename, and summary for the document.",
+            "Drive upload, local memory updates, and optional financial extraction complete before a confirmation goes back to Telegram.",
+          ],
+          sources: [
+            { label: "Upload handler", path: "telegram_bot/bot.py", detail: "Downloads Telegram files and orchestrates filing." },
+            { label: "Extraction helpers", path: "utils/text_extraction.py", detail: "Extracts text and describes images when needed." },
+            { label: "Classifier", path: "agent_sdk/filer.py", detail: "Produces the folder, filename, and summary payload." },
+            { label: "Financial parser", path: "utils/financial_extraction.py", detail: "Adds vendor, amount, and category data for finance documents." },
+          ],
+        },
+        "gmail-filing": {
+          title: "Gmail filing",
+          summary: "Unread messages are polled in the background, parsed, filtered for relevance, then filed to Drive and memory with activity tracking.",
+          note: "The relevance stage is intentionally conservative. If validation fails, the watcher prefers filing over silently losing a useful document.",
+          nodes: [
+            "input-gmail-watcher",
+            "tool-google-clients",
+            "tool-parser",
+            "agent-relevance",
+            "tool-openrouter",
+            "agent-classification",
+            "storage-drive",
+            "tool-agent-tools",
+            "storage-memory",
+            "agent-financial",
+            "storage-activity",
+            "output-watcher",
+          ],
+          edges: [
+            "input-gmail-google",
+            "google-parser",
+            "parser-relevance",
+            "relevance-openrouter",
+            "openrouter-relevance",
+            "relevance-classification",
+            "classification-openrouter",
+            "openrouter-classification",
+            "classification-google",
+            "google-drive",
+            "classification-tools",
+            "tools-memory",
+            "parser-financial",
+            "financial-openrouter",
+            "openrouter-financial",
+            "financial-tools",
+            "google-activity",
+            "activity-output",
+          ],
+          steps: [
+            "The Gmail watcher polls unread mail through the Gmail client and parses each candidate message plus its attachments.",
+            "The Relevance Agent decides whether the message is worth filing before the rest of the pipeline continues.",
+            "The Classification Agent places the document in Drive, while the Financial Agent extracts structured finance details when applicable.",
+            "Drive state, local memory, and watcher activity records are updated so the dashboard can reflect what happened.",
+          ],
+          sources: [
+            { label: "Watcher", path: "gmail/watcher.py", detail: "Polls unread mail and hands each message to the filing callback." },
+            { label: "Parser", path: "gmail/parser.py", detail: "Builds the parsed email payload and extracts attachment text." },
+            { label: "Relevance filter", path: "gmail/relevance.py", detail: "Determines whether filing should proceed." },
+            { label: "Pipeline callback", path: "main.py", detail: "Coordinates classification, Drive upload, memory writes, and activity logging." },
+          ],
+        },
+        "drive-qa": {
+          title: "Drive Q&A",
+          summary: "Document questions start in Telegram, then the Chat Agent searches Drive, reads the selected file, extracts text, and answers with file-backed context.",
+          note: "Drive Q&A is a chat turn that leans heavily on Drive search and read paths, rather than on direct memory recall alone.",
+          nodes: [
+            "input-telegram-chat",
+            "agent-chat",
+            "tool-openrouter",
+            "tool-agent-tools",
+            "tool-google-clients",
+            "storage-drive",
+            "tool-parser",
+            "storage-memory",
+            "output-telegram-reply",
+          ],
+          edges: [
+            "input-chat-agent",
+            "chat-openrouter",
+            "openrouter-chat",
+            "chat-tools",
+            "tools-google",
+            "google-drive",
+            "drive-parser",
+            "parser-chat",
+            "memory-chat",
+            "chat-output",
+          ],
+          steps: [
+            "A Telegram message asks about a stored document or requests a file lookup.",
+            "The Chat Agent decides to search or read Drive, then calls the Drive client through the tool layer.",
+            "Downloaded file content is passed through text extraction or image description before re-entering the agent loop.",
+            "The agent combines document text with memory context and returns a grounded Telegram answer.",
+          ],
+          sources: [
+            { label: "Telegram ingress", path: "telegram_bot/bot.py", detail: "Passes document questions into the chat loop." },
+            { label: "Chat loop", path: "core/agent.py", detail: "Executes Drive search and file read tools." },
+            { label: "Drive client", path: "storage/drive.py", detail: "Searches Drive and downloads files for Q&A." },
+            { label: "Extraction helpers", path: "utils/text_extraction.py", detail: "Turns downloaded files into text the agent can reason over." },
+          ],
+        },
+        "calendar-tasks": {
+          title: "Calendar & tasks",
+          summary: "Date-driven requests start in chat, resolve against local time context, then update Google Calendar or local task storage before the answer comes back with absolute dates.",
+          note: "Tasks stay local in SQLite, while calendar events flow through the Google Calendar client. The reply should still mention the resolved absolute date either way.",
+          nodes: [
+            "input-telegram-chat",
+            "agent-chat",
+            "tool-openrouter",
+            "tool-agent-tools",
+            "storage-memory",
+            "storage-calendar",
+            "output-telegram-reply",
+          ],
+          edges: [
+            "input-chat-agent",
+            "chat-openrouter",
+            "openrouter-chat",
+            "chat-tools",
+            "tools-memory",
+            "tools-calendar",
+            "memory-chat",
+            "calendar-chat",
+            "chat-output",
+          ],
+          steps: [
+            "A Telegram request asks what is scheduled, creates an event, or explicitly asks for a task or reminder.",
+            "The Chat Agent uses time-aware helpers so relative dates such as today, tomorrow, or Monday resolve correctly.",
+            "Calendar operations write to Google Calendar, while task operations remain in local SQLite-backed storage.",
+            "The reply returns to Telegram with the resolved absolute date and the resulting task or calendar state.",
+          ],
+          sources: [
+            { label: "Chat loop", path: "core/agent.py", detail: "Routes requests into calendar and task tool implementations." },
+            { label: "Time helpers", path: "core/time_utils.py", detail: "Resolves relative dates into concrete calendar ranges and event times." },
+            { label: "Calendar client", path: "calendar_api/client.py", detail: "Queries and creates Google Calendar events." },
+            { label: "Task storage", path: "memory/manager.py", detail: "Stores and completes local tasks in SQLite." },
+          ],
+        },
+      };
+
+      let activeScenarioId = "telegram-chat";
+      let inspectedNodeId = null;
+      let resizeTimer = 0;
+
+      function createSvgPath(edge, rect) {
+        const fromNode = nodeElements.get(edge.from);
+        const toNode = nodeElements.get(edge.to);
+        if (!fromNode || !toNode) {
+          return null;
+        }
+
+        const fromRect = fromNode.getBoundingClientRect();
+        const toRect = toNode.getBoundingClientRect();
+        const x1 = fromRect.left + fromRect.width / 2 - rect.left;
+        const y1 = fromRect.top + fromRect.height / 2 - rect.top;
+        const x2 = toRect.left + toRect.width / 2 - rect.left;
+        const y2 = toRect.top + toRect.height / 2 - rect.top;
+
+        const dx = Math.abs(x2 - x1);
+        const dy = Math.abs(y2 - y1);
+        const horizontalBias = Math.max(40, dx * 0.45);
+        const verticalBias = Math.max(28, dy * 0.30);
+
+        let c1x = x1;
+        let c1y = y1;
+        let c2x = x2;
+        let c2y = y2;
+
+        if (dx > dy) {
+          const direction = x2 >= x1 ? 1 : -1;
+          c1x = x1 + horizontalBias * direction;
+          c2x = x2 - horizontalBias * direction;
+        } else {
+          const direction = y2 >= y1 ? 1 : -1;
+          c1y = y1 + verticalBias * direction;
+          c2y = y2 - verticalBias * direction;
+        }
+
+        const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        path.setAttribute("d", `M ${x1} ${y1} C ${c1x} ${c1y}, ${c2x} ${c2y}, ${x2} ${y2}`);
+        path.setAttribute("class", "arch-edge");
+        path.dataset.edge = edge.id;
+        return path;
+      }
+
+      function renderEdges() {
+        if (!map || !edgeLayer || !map.offsetWidth || !map.offsetHeight) {
+          return;
+        }
+
+        const rect = map.getBoundingClientRect();
+        edgeLayer.setAttribute("viewBox", `0 0 ${Math.ceil(rect.width)} ${Math.ceil(rect.height)}`);
+        edgeLayer.setAttribute("width", Math.ceil(rect.width));
+        edgeLayer.setAttribute("height", Math.ceil(rect.height));
+        edgeLayer.replaceChildren();
+
+        edgeElements = new Map();
+        for (const edge of edgeDefs) {
+          const path = createSvgPath(edge, rect);
+          if (!path) {
+            continue;
+          }
+          edgeLayer.appendChild(path);
+          edgeElements.set(edge.id, path);
+        }
+
+        applyScenario(activeScenarioId);
+      }
+
+      function renderSources(items) {
+        if (!sourceGrid) {
+          return;
+        }
+        sourceGrid.replaceChildren();
+
+        for (const item of items) {
+          const card = document.createElement("div");
+          card.className = "source-card";
+
+          const title = document.createElement("strong");
+          title.textContent = item.label;
+          card.appendChild(title);
+
+          const detail = document.createElement("p");
+          detail.textContent = item.detail;
+          card.appendChild(detail);
+
+          const path = document.createElement("code");
+          path.textContent = item.path;
+          card.appendChild(path);
+
+          sourceGrid.appendChild(card);
+        }
+      }
+
+      function setInspection(nodeId) {
+        inspectedNodeId = nodeId;
+        const scenario = scenarios[activeScenarioId];
+        const connectedNodes = new Set();
+        const activeEdges = new Set(scenario.edges);
+
+        if (nodeId) {
+          connectedNodes.add(nodeId);
+          for (const edgeId of scenario.edges) {
+            const edge = edgeDefsById.get(edgeId);
+            if (!edge) {
+              continue;
+            }
+            if (edge.from === nodeId || edge.to === nodeId) {
+              connectedNodes.add(edge.from);
+              connectedNodes.add(edge.to);
+            }
+          }
+        }
+
+        for (const [id, node] of nodeElements) {
+          node.classList.toggle("is-inspected", Boolean(nodeId) && connectedNodes.has(id));
+        }
+
+        for (const [id, edgeEl] of edgeElements) {
+          const edge = edgeDefsById.get(id);
+          const inspectEdge = Boolean(
+            nodeId &&
+            activeEdges.has(id) &&
+            edge &&
+            (edge.from === nodeId || edge.to === nodeId)
+          );
+          edgeEl.classList.toggle("is-inspected", inspectEdge);
+        }
+
+        if (!inspectLabel) {
+          return;
+        }
+        if (!nodeId) {
+          inspectLabel.textContent = "Path focus changes on hover.";
+          return;
+        }
+        const detail = nodeDetails.get(nodeId);
+        inspectLabel.textContent = detail
+          ? `Inspecting ${detail.title}: ${detail.detail}`
+          : "Path focus changes on hover.";
+      }
+
+      function applyScenario(scenarioId) {
+        const scenario = scenarios[scenarioId];
+        if (!scenario) {
+          return;
+        }
+        activeScenarioId = scenarioId;
+
+        for (const button of scenarioButtons) {
+          const active = button.dataset.scenario === scenarioId;
+          button.classList.toggle("active", active);
+          button.setAttribute("aria-selected", active ? "true" : "false");
+        }
+
+        const activeNodes = new Set(scenario.nodes);
+        const activeEdges = new Set(scenario.edges);
+
+        for (const [id, node] of nodeElements) {
+          node.classList.toggle("is-active", activeNodes.has(id));
+          node.classList.toggle("is-dim", !activeNodes.has(id));
+        }
+
+        for (const [id, edgeEl] of edgeElements) {
+          edgeEl.classList.toggle("is-active", activeEdges.has(id));
+          edgeEl.classList.toggle("is-dim", !activeEdges.has(id));
+          edgeEl.classList.remove("is-inspected");
+        }
+
+        if (storyTitle) {
+          storyTitle.textContent = scenario.title;
+        }
+        if (storySummary) {
+          storySummary.textContent = scenario.summary;
+        }
+        if (storySteps) {
+          storySteps.replaceChildren();
+          for (const step of scenario.steps) {
+            const item = document.createElement("li");
+            item.textContent = step;
+            storySteps.appendChild(item);
+          }
+        }
+        if (storyNote) {
+          storyNote.textContent = scenario.note;
+        }
+
+        renderSources(scenario.sources);
+        setInspection(null);
+      }
+
+      function activate(target) {
+        for (const tab of tabs) {
+          tab.classList.toggle("active", tab.dataset.target === target);
+          tab.setAttribute("aria-selected", tab.dataset.target === target ? "true" : "false");
+        }
+        for (const panel of panels) {
+          panel.classList.toggle("active", panel.id === target);
+        }
+        if (history.replaceState) {
+          history.replaceState(null, "", "#" + target);
+        }
+        if (target === "architecture") {
+          requestAnimationFrame(renderEdges);
+        }
+      }
+
+      for (const tab of tabs) {
+        tab.addEventListener("click", () => activate(tab.dataset.target));
+      }
+
+      for (const button of scenarioButtons) {
+        button.addEventListener("click", () => applyScenario(button.dataset.scenario));
+      }
+
+      for (const [id, node] of nodeElements) {
+        const handleInspect = () => {
+          if (node.classList.contains("is-active")) {
+            setInspection(id);
+          }
+        };
+        node.addEventListener("mouseenter", handleInspect);
+        node.addEventListener("focus", handleInspect);
+        node.addEventListener("mouseleave", () => setInspection(null));
+        node.addEventListener("blur", () => setInspection(null));
+      }
+
+      window.addEventListener("resize", () => {
+        window.clearTimeout(resizeTimer);
+        resizeTimer = window.setTimeout(renderEdges, 80);
+      });
+
+      if (window.ResizeObserver && map) {
+        const resizeObserver = new ResizeObserver(() => renderEdges());
+        resizeObserver.observe(map);
+      }
+
+      if (document.fonts && document.fonts.ready) {
+        document.fonts.ready.then(() => renderEdges());
+      }
+
+      applyScenario(activeScenarioId);
+
+      const hash = window.location.hash.replace(/^#/, "");
+      if (hash && document.getElementById(hash)) {
+        activate(hash);
+      } else {
+        requestAnimationFrame(renderEdges);
+      }
+    })();
+  </script>
+</body>
+</html>

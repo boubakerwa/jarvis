@@ -11,6 +11,37 @@ from memory.schema import MemoryCategory, MemoryRecord
 
 logger = logging.getLogger(__name__)
 
+_CREATE_FINANCIAL_TABLE = """
+CREATE TABLE IF NOT EXISTS financial_records (
+    id TEXT PRIMARY KEY,
+    drive_file_id TEXT,
+    vendor TEXT,
+    amount REAL,
+    currency TEXT DEFAULT 'EUR',
+    category TEXT,
+    date TEXT,
+    description TEXT,
+    source TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_financial_vendor ON financial_records(vendor);
+CREATE INDEX IF NOT EXISTS idx_financial_date ON financial_records(date);
+CREATE INDEX IF NOT EXISTS idx_financial_category ON financial_records(category);
+"""
+
+_CREATE_TASKS_TABLE = """
+CREATE TABLE IF NOT EXISTS tasks (
+    id TEXT PRIMARY KEY,
+    description TEXT NOT NULL,
+    due_date TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT NOT NULL,
+    completed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+CREATE INDEX IF NOT EXISTS idx_tasks_due ON tasks(due_date);
+"""
+
 _CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS memories (
     id TEXT PRIMARY KEY,
@@ -37,6 +68,8 @@ class MemoryManager:
         self._db = sqlite3.connect(settings.JARVIS_DB_PATH, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         self._db.executescript(_CREATE_TABLE)
+        self._db.executescript(_CREATE_TASKS_TABLE)
+        self._db.executescript(_CREATE_FINANCIAL_TABLE)
         self._db.commit()
 
         self._chroma = chromadb.PersistentClient(path=settings.JARVIS_CHROMA_PATH)
@@ -110,6 +143,126 @@ class MemoryManager:
     def count(self) -> int:
         row = self._db.execute("SELECT COUNT(*) FROM memories WHERE active=1").fetchone()
         return row[0]
+
+    # ------------------------------------------------------------------
+    # Tasks
+    # ------------------------------------------------------------------
+
+    def create_task(self, description: str, due_date: Optional[str] = None) -> dict:
+        import uuid
+        task_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+        self._db.execute(
+            "INSERT INTO tasks (id, description, due_date, status, created_at) VALUES (?, ?, ?, 'pending', ?)",
+            (task_id, description, due_date, now),
+        )
+        self._db.commit()
+        logger.info("Task created: %s", description[:60])
+        return {"id": task_id, "description": description, "due_date": due_date, "status": "pending"}
+
+    def list_tasks(self, status: str = "pending") -> list[dict]:
+        if status == "all":
+            rows = self._db.execute(
+                "SELECT * FROM tasks ORDER BY due_date, created_at"
+            ).fetchall()
+        else:
+            rows = self._db.execute(
+                "SELECT * FROM tasks WHERE status=? ORDER BY due_date, created_at",
+                (status,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def complete_task(self, task_id: str) -> bool:
+        now = datetime.now(timezone.utc).isoformat()
+        cursor = self._db.execute(
+            "UPDATE tasks SET status='done', completed_at=? WHERE id=? AND status='pending'",
+            (now, task_id),
+        )
+        self._db.commit()
+        return cursor.rowcount > 0
+
+    # ------------------------------------------------------------------
+    # Financial records
+    # ------------------------------------------------------------------
+
+    def add_financial_record(
+        self,
+        vendor: str,
+        amount: float,
+        currency: str,
+        category: str,
+        date: str,
+        description: str,
+        drive_file_id: str,
+        source: str,
+    ) -> dict:
+        import uuid
+        record_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+        self._db.execute(
+            """INSERT INTO financial_records
+               (id, drive_file_id, vendor, amount, currency, category, date, description, source, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (record_id, drive_file_id, vendor, amount, currency, category, date, description, source, now),
+        )
+        self._db.commit()
+        logger.info("Financial record added: %s %.2f %s from %s", category, amount, currency, vendor)
+        return {
+            "id": record_id,
+            "vendor": vendor,
+            "amount": amount,
+            "currency": currency,
+            "category": category,
+            "date": date,
+        }
+
+    def query_financials(
+        self,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        vendor: Optional[str] = None,
+        category: Optional[str] = None,
+    ) -> list[dict]:
+        query = "SELECT * FROM financial_records WHERE 1=1"
+        params: list = []
+        if start_date:
+            query += " AND date >= ?"
+            params.append(start_date)
+        if end_date:
+            query += " AND date <= ?"
+            params.append(end_date)
+        if vendor:
+            query += " AND vendor LIKE ?"
+            params.append(f"%{vendor}%")
+        if category:
+            query += " AND category = ?"
+            params.append(category)
+        query += " ORDER BY date DESC"
+        rows = self._db.execute(query, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def financial_summary(
+        self,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> dict:
+        records = self.query_financials(start_date=start_date, end_date=end_date)
+        by_category: dict[str, float] = {}
+        by_vendor: dict[str, float] = {}
+        total = 0.0
+        for r in records:
+            amt = r.get("amount") or 0.0
+            cat = r.get("category", "other")
+            vendor = r.get("vendor", "unknown")
+            by_category[cat] = by_category.get(cat, 0.0) + amt
+            by_vendor[vendor] = by_vendor.get(vendor, 0.0) + amt
+            total += amt
+        return {
+            "total": total,
+            "by_category": by_category,
+            "by_vendor": by_vendor,
+            "record_count": len(records),
+        }
 
     # ------------------------------------------------------------------
     # Private helpers

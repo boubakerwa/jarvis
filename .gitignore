@@ -10,4 +10,5 @@ build/
 .venv/
 venv/
 token.json
+.credentials.json
 credentials.json

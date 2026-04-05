@@ -1,22 +1,17 @@
 """
-Attachment classifier using the Anthropic Python SDK directly.
-Sends a classification prompt to Claude and parses the JSON response.
+Attachment classifier using the Anthropic-compatible Messages API via OpenRouter.
+Sends a classification prompt to the configured model and parses the JSON response.
 
-Note: The PRD specifies claude-agent-sdk for this task. We implement this
-using the standard anthropic SDK with a focused single-turn call, which gives
-us the same result without the overhead of a full agentic loop.
+Note: The local package name stays `agent_sdk` for compatibility, but this code
+uses the standard Anthropic SDK routed through OpenRouter rather than the
+claude-agent-sdk package.
 """
-import json
-import logging
+import os
 import re
 from dataclasses import dataclass
 
-import anthropic
-
-from config import settings
-from storage.schema import build_classification_prompt
-
-logger = logging.getLogger(__name__)
+from core.structured_output import generate_validated_json
+from storage.schema import TOP_LEVEL_FOLDERS, build_classification_prompt
 
 
 @dataclass
@@ -27,37 +22,72 @@ class ClassificationResult:
     summary: str
 
 
+def _sanitize_sub_folder(value: str) -> str:
+    text = str(value or "").strip().replace("/", " - ").replace("\\", " - ")
+    text = re.sub(r"\s+", " ", text).strip(" -")
+    if not text:
+        raise ValueError("sub_folder is missing")
+    return text[:120]
+
+
+def _sanitize_filename(value: str, original_filename: str) -> str:
+    proposed = str(value or "").strip()
+    proposed_ext = os.path.splitext(proposed)[1].lower()
+    original_ext = os.path.splitext(original_filename)[1].lower()
+    ext = proposed_ext or original_ext
+
+    stem = os.path.splitext(proposed)[0].strip().lower()
+    if not stem:
+        fallback_stem = os.path.splitext(original_filename)[0].strip().lower() or "document"
+        stem = fallback_stem
+
+    stem = stem.replace(" ", "_")
+    stem = re.sub(r"[^a-z0-9_-]+", "_", stem)
+    stem = re.sub(r"_+", "_", stem).strip("_")
+    if not stem:
+        stem = "document"
+
+    return f"{stem}{ext}"
+
+
+def _validate_classification_payload(data: dict, original_filename: str) -> ClassificationResult:
+    top_level = str(data.get("top_level", "")).strip()
+    if top_level not in TOP_LEVEL_FOLDERS:
+        raise ValueError(f"Invalid top_level: {top_level!r}")
+
+    summary = str(data.get("summary", "")).strip()
+    if not summary:
+        raise ValueError("summary is missing")
+
+    return ClassificationResult(
+        top_level=top_level,
+        sub_folder=_sanitize_sub_folder(data.get("sub_folder", "")),
+        filename=_sanitize_filename(data.get("filename", ""), original_filename),
+        summary=summary[:280],
+    )
+
+
 def classify_attachment(
     original_filename: str,
     mime_type: str,
     text_content: str,
+    raw_data: bytes = b"",
 ) -> ClassificationResult:
     """
-    Classify a file attachment using Claude.
+    Classify a file attachment using the configured LLM.
+    For images, uses vision to generate a description if text_content is empty.
     Returns a ClassificationResult with the target Drive path and filename.
     """
+    if mime_type.startswith("image/") and not text_content and raw_data:
+        from utils.text_extraction import describe_image
+        text_content = describe_image(raw_data, mime_type)
+
     prompt = build_classification_prompt(original_filename, mime_type, text_content)
 
-    client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
-    response = client.messages.create(
-        model=settings.CLAUDE_MODEL,
+    return generate_validated_json(
+        task="classification",
         max_tokens=512,
         messages=[{"role": "user", "content": prompt}],
-    )
-
-    raw = response.content[0].text.strip()
-    logger.debug("Classification raw response: %s", raw)
-
-    # Extract JSON from response (may have surrounding text)
-    json_match = re.search(r"\{.*\}", raw, re.DOTALL)
-    if not json_match:
-        raise ValueError(f"No JSON found in classifier response: {raw!r}")
-
-    data = json.loads(json_match.group())
-
-    return ClassificationResult(
-        top_level=data["top_level"],
-        sub_folder=data["sub_folder"],
-        filename=data["filename"],
-        summary=data["summary"],
+        validator=lambda data: _validate_classification_payload(data, original_filename),
+        allow_fallback=True,
     )
