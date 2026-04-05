@@ -53,6 +53,8 @@ GMAIL_START_DATE: str = os.getenv("GMAIL_START_DATE", "").strip()
 JARVIS_TIMEZONE: str = os.getenv("JARVIS_TIMEZONE", "").strip()
 JARVIS_DB_PATH: str = os.getenv("JARVIS_DB_PATH", "./data/jarvis_memory.db")
 JARVIS_CHROMA_PATH: str = os.getenv("JARVIS_CHROMA_PATH", "./data/jarvis_chroma")
+OBSIDIAN_VAULT_PATH: str = os.getenv("OBSIDIAN_VAULT_PATH", "").strip()
+OBSIDIAN_ROOT_FOLDER: str = os.getenv("OBSIDIAN_ROOT_FOLDER", "Marvis").strip()
 
 # Prevent the Anthropic SDK from picking up a legacy first-party API key when routing via OpenRouter.
 os.environ.pop("ANTHROPIC_API_KEY", None)

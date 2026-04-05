@@ -6,6 +6,7 @@ NOTE: Adding calendar scope requires deleting token.json and re-authenticating.
 import logging
 import os
 from datetime import date, datetime, timedelta, timezone
+from time import monotonic
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -13,6 +14,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
 from config import settings
+from core.opslog import record_activity, record_audit, record_issue
 
 logger = logging.getLogger(__name__)
 
@@ -50,33 +52,53 @@ class CalendarClient:
         Query upcoming calendar events between time_min and time_max (ISO 8601).
         Returns list of {summary, start, end, description, location, id}.
         """
-        result = (
-            self._service.events()
-            .list(
-                calendarId="primary",
-                timeMin=time_min,
-                timeMax=time_max,
-                maxResults=max_results,
-                singleEvents=True,
-                orderBy="startTime",
+        started = monotonic()
+        try:
+            result = (
+                self._service.events()
+                .list(
+                    calendarId="primary",
+                    timeMin=time_min,
+                    timeMax=time_max,
+                    maxResults=max_results,
+                    singleEvents=True,
+                    orderBy="startTime",
+                )
+                .execute()
             )
-            .execute()
-        )
-        events = []
-        for item in result.get("items", []):
-            start = item.get("start", {})
-            end = item.get("end", {})
-            events.append(
-                {
-                    "id": item.get("id", ""),
-                    "summary": item.get("summary", "(no title)"),
-                    "start": start.get("dateTime", start.get("date", "")),
-                    "end": end.get("dateTime", end.get("date", "")),
-                    "description": item.get("description", ""),
-                    "location": item.get("location", ""),
-                }
+            events = []
+            for item in result.get("items", []):
+                start = item.get("start", {})
+                end = item.get("end", {})
+                events.append(
+                    {
+                        "id": item.get("id", ""),
+                        "summary": item.get("summary", "(no title)"),
+                        "start": start.get("dateTime", start.get("date", "")),
+                        "end": end.get("dateTime", end.get("date", "")),
+                        "description": item.get("description", ""),
+                        "location": item.get("location", ""),
+                    }
+                )
+            record_activity(
+                event="calendar_query_completed",
+                component="calendar",
+                summary="Calendar query completed",
+                duration_ms=(monotonic() - started) * 1000,
+                metadata={"result_count": len(events)},
             )
-        return events
+            return events
+        except Exception as exc:
+            record_issue(
+                level="ERROR",
+                event="calendar_query_failed",
+                component="calendar",
+                status="error",
+                summary="Calendar query failed",
+                duration_ms=(monotonic() - started) * 1000,
+                metadata={"error": str(exc)},
+            )
+            raise
 
     def create_event(
         self,
@@ -115,12 +137,38 @@ class CalendarClient:
         if location:
             body["location"] = location
 
-        event = self._service.events().insert(calendarId="primary", body=body).execute()
-        logger.info("Created calendar event: %s (ID: %s)", summary, event.get("id"))
-        return {
-            "id": event.get("id", ""),
-            "summary": event.get("summary", ""),
-            "htmlLink": event.get("htmlLink", ""),
-            "start": event.get("start", {}).get("dateTime", event.get("start", {}).get("date", start)),
-            "end": event.get("end", {}).get("dateTime", event.get("end", {}).get("date", end)),
-        }
+        started = monotonic()
+        try:
+            event = self._service.events().insert(calendarId="primary", body=body).execute()
+            logger.info("Created calendar event: %s (ID: %s)", summary, event.get("id"))
+            record_activity(
+                event="calendar_event_created",
+                component="calendar",
+                summary="Created calendar event",
+                duration_ms=(monotonic() - started) * 1000,
+                metadata={"all_day": all_day},
+            )
+            record_audit(
+                event="calendar_event_created",
+                component="calendar",
+                summary="Created calendar event",
+                metadata={"all_day": all_day},
+            )
+            return {
+                "id": event.get("id", ""),
+                "summary": event.get("summary", ""),
+                "htmlLink": event.get("htmlLink", ""),
+                "start": event.get("start", {}).get("dateTime", event.get("start", {}).get("date", start)),
+                "end": event.get("end", {}).get("dateTime", event.get("end", {}).get("date", end)),
+            }
+        except Exception as exc:
+            record_issue(
+                level="ERROR",
+                event="calendar_event_create_failed",
+                component="calendar",
+                status="error",
+                summary="Failed to create calendar event",
+                duration_ms=(monotonic() - started) * 1000,
+                metadata={"error": str(exc), "all_day": all_day},
+            )
+            raise
