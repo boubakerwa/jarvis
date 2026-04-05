@@ -423,7 +423,7 @@
     <header>
       <div>
         <h1>Marvis docs</h1>
-        <div class="muted">Marvis is the local assistant that watches Gmail, files documents, keeps memory, and talks over Telegram.</div>
+        <div class="muted">Marvis is the local assistant that watches Gmail, files documents, writes shared notes, keeps memory, and exposes LLMOps telemetry through a local dashboard.</div>
       </div>
       <div class="muted">Standalone file: <code>docs/index.html</code></div>
     </header>
@@ -447,11 +447,15 @@
       <div class="grid">
         <div class="box">
           <h3>Assistant loop</h3>
-          <p>Marvis answers Telegram messages through the agent loop, with memory, Drive search, calendar, task, and financial tools available when needed.</p>
+          <p>Marvis answers Telegram messages through the agent loop, with memory, Obsidian notes, Drive search, calendar, task, and financial tools available when needed.</p>
         </div>
         <div class="box">
           <h3>Background watcher</h3>
           <p>It polls Gmail on a timer, decides whether a message is worth filing, extracts attachments, classifies them, and stores them in Drive plus memory.</p>
+        </div>
+        <div class="box">
+          <h3>Operator visibility</h3>
+          <p>The local dashboard and <code>/llmops</code> surface token usage, estimated cost, heartbeat freshness, warnings, errors, and audit events such as note writes and calendar mutations.</p>
         </div>
       </div>
 
@@ -462,12 +466,14 @@
           <div class="arrow">→</div>
           <div class="node"><strong>Core agent</strong><span><code>core/agent.py</code></span></div>
           <div class="arrow">→</div>
-          <div class="node"><strong>Tools</strong><span>memory, Drive, calendar, tasks</span></div>
+          <div class="node"><strong>Tools</strong><span>memory, notes, Drive, calendar, tasks</span></div>
         </div>
         <div class="flow compact" style="margin-top:12px">
           <div class="leaf"><strong>Gmail watcher</strong><span>polls unread mail, files attachments</span></div>
           <div class="leaf"><strong>OpenRouter</strong><span>model calls stay Anthropic-shaped</span></div>
+          <div class="leaf"><strong>Obsidian vault</strong><span>shared Markdown workspace for collaborative notes</span></div>
           <div class="leaf"><strong>SQLite + ChromaDB</strong><span>memory, tasks, financial records</span></div>
+          <div class="leaf"><strong>LLMOps + ops logs</strong><span>local telemetry and audit streams for the dashboard</span></div>
         </div>
       </div>
 
@@ -490,6 +496,7 @@
         <tr><th>OpenRouter</th><td><code>OPENROUTER_API_KEY</code>, <code>OPENROUTER_MODEL</code>, optional task-specific model overrides</td></tr>
         <tr><th>Telegram</th><td><code>TELEGRAM_BOT_TOKEN</code>, <code>TELEGRAM_ALLOWED_USER_ID</code></td></tr>
         <tr><th>Google</th><td><code>GOOGLE_CREDENTIALS_PATH</code>, <code>GOOGLE_TOKEN_PATH</code></td></tr>
+        <tr><th>Notes</th><td><code>OBSIDIAN_VAULT_PATH</code>, optional <code>OBSIDIAN_ROOT_FOLDER</code> (use <code>.</code> for vault root)</td></tr>
         <tr><th>Runtime</th><td><code>GMAIL_POLL_INTERVAL</code>, <code>GMAIL_START_DATE</code>, <code>JARVIS_TIMEZONE</code></td></tr>
       </table>
 
@@ -507,16 +514,17 @@
       <h2>Telegram usage</h2>
       <div class="flow compact">
         <div class="leaf"><strong>User message</strong><span>plain text goes into the agent loop</span></div>
-        <div class="leaf"><strong>Commands</strong><span><code>/status</code>, <code>/memories</code>, <code>/forget</code>, <code>/reset</code></span></div>
+        <div class="leaf"><strong>Commands</strong><span><code>/status</code>, <code>/llmops</code>, <code>/memories</code>, <code>/forget</code>, <code>/reset</code></span></div>
         <div class="leaf"><strong>Uploads</strong><span>documents and photos are filed to Drive</span></div>
       </div>
 
       <table class="table" aria-label="Telegram commands">
         <tr><th>Any text</th><td>Passed to the agent as a normal chat message.</td></tr>
+        <tr><th><code>/llmops</code></th><td>Shows recent model usage, estimated costs, latency, and short-horizon ops health.</td></tr>
         <tr><th><code>/memories</code></th><td>Lists stored memories grouped by category.</td></tr>
         <tr><th><code>/forget &lt;topic&gt;</code></th><td>Deletes a memory by topic.</td></tr>
         <tr><th><code>/reset</code></th><td>Clears conversation history only. Long-term memory stays intact.</td></tr>
-        <tr><th><code>/status</code></th><td>Shows memory count, Drive state, Calendar state, and current model.</td></tr>
+        <tr><th><code>/status</code></th><td>Shows memory count, Drive state, Calendar state, notes state, and current model.</td></tr>
       </table>
 
       <div class="note">
@@ -549,7 +557,7 @@
 
     <section class="panel" id="architecture" data-panel>
       <h2>Interactive architecture flow</h2>
-      <p class="architecture-intro">Switch scenarios to trace how information moves across inputs, agents, tools and APIs, storage layers, and user-facing outputs. The same shared map powers chat, uploads, Gmail filing, document Q&amp;A, and calendar or task requests.</p>
+      <p class="architecture-intro">Switch scenarios to trace how information moves across inputs, agents, tools and APIs, storage layers, and user-facing outputs. The same shared map powers chat, uploads, Gmail filing, document Q&amp;A, notes collaboration, and operator observability.</p>
 
       <div class="note">
         <strong>Accuracy note</strong>
@@ -562,6 +570,7 @@
           <button class="scenario-tab" type="button" data-scenario="telegram-upload">Telegram upload</button>
           <button class="scenario-tab" type="button" data-scenario="gmail-filing">Gmail filing</button>
           <button class="scenario-tab" type="button" data-scenario="drive-qa">Drive Q&amp;A</button>
+          <button class="scenario-tab" type="button" data-scenario="notes-observability">Notes &amp; ops</button>
           <button class="scenario-tab" type="button" data-scenario="calendar-tasks">Calendar &amp; tasks</button>
         </div>
         <div class="architecture-caption">Default scenario: Telegram chat. Hover any highlighted node to inspect it, and on narrow screens scroll sideways to keep the five-lane map intact.</div>
@@ -588,6 +597,11 @@
                   <span class="node-kicker">Input</span>
                   <strong>Gmail watcher</strong>
                   <span>Unread mail is polled in the background by <code>gmail/watcher.py</code>.</span>
+                </button>
+                <button class="arch-node" type="button" data-node="input-dashboard">
+                  <span class="node-kicker">Input</span>
+                  <strong>Dashboard browser</strong>
+                  <span>A local browser session requests dashboard fragments and the docs route from <code>dashboard/app.py</code>.</span>
                 </button>
               </div>
             </div>
@@ -639,7 +653,12 @@
                 <button class="arch-node" type="button" data-node="tool-agent-tools">
                   <span class="node-kicker">Tooling</span>
                   <strong>Local tools &amp; managers</strong>
-                  <span>Memory updates, task operations, and Drive or calendar helpers coordinated by the chat loop and upload handlers.</span>
+                  <span>Memory updates, note operations, task operations, and Drive or calendar helpers coordinated by the chat loop and upload handlers.</span>
+                </button>
+                <button class="arch-node" type="button" data-node="tool-observability">
+                  <span class="node-kicker">Runtime</span>
+                  <strong>LLMOps &amp; ops logging</strong>
+                  <span><code>core/llmops.py</code> and <code>core/opslog.py</code> record model telemetry, heartbeats, issues, and audit events.</span>
                 </button>
                 <button class="arch-node" type="button" data-node="tool-google-clients">
                   <span class="node-kicker">API layer</span>
@@ -657,6 +676,11 @@
                   <strong>SQLite + ChromaDB</strong>
                   <span>Memories, tasks, financial records, and semantic recall stay local under <code>memory/manager.py</code>.</span>
                 </button>
+                <button class="arch-node" type="button" data-node="storage-notes">
+                  <span class="node-kicker">Storage</span>
+                  <strong>Obsidian vault</strong>
+                  <span>Collaborative Markdown notes live in the shared vault through <code>notes/obsidian.py</code> and <code>notes/service.py</code>.</span>
+                </button>
                 <button class="arch-node" type="button" data-node="storage-drive">
                   <span class="node-kicker">Storage</span>
                   <strong>Google Drive library</strong>
@@ -671,6 +695,11 @@
                   <span class="node-kicker">Storage</span>
                   <strong>Watcher activity</strong>
                   <span><code>data/gmail_state.txt</code> and <code>data/gmail_activity.jsonl</code> capture progress and outcomes.</span>
+                </button>
+                <button class="arch-node" type="button" data-node="storage-ops">
+                  <span class="node-kicker">Storage</span>
+                  <strong>LLMOps + ops JSONL</strong>
+                  <span><code>data/llm_activity.jsonl</code>, <code>data/ops_activity.jsonl</code>, <code>data/ops_issues.jsonl</code>, and <code>data/ops_audit.jsonl</code> power short-horizon observability.</span>
                 </button>
               </div>
             </div>
@@ -692,6 +721,11 @@
                   <span class="node-kicker">Output</span>
                   <strong>Watcher update</strong>
                   <span>Gmail activity is recorded as filed, skipped, partial, or failed for later inspection.</span>
+                </button>
+                <button class="arch-node" type="button" data-node="output-dashboard">
+                  <span class="node-kicker">Output</span>
+                  <strong>Dashboard surfaces</strong>
+                  <span>The overview, Drive, memory, docs, and LLMOps views render local state for operator inspection.</span>
                 </button>
               </div>
             </div>
@@ -768,7 +802,7 @@
       </div>
 
       <div class="callout">
-        Structured-output paths are where most of the routing discipline lives. Relevance and financial extraction fail safely, while classification can retry through the default model when a task-specific route returns invalid JSON.
+        Structured-output paths are where most of the routing discipline lives. Relevance and financial extraction fail safely, while classification can retry through the default model when a task-specific route returns invalid JSON. Every routed call also writes LLM telemetry to <code>data/llm_activity.jsonl</code>, which feeds the dashboard and <code>/llmops</code>.
       </div>
     </section>
 
@@ -809,15 +843,21 @@
 
       const edgeDefs = [
         { id: "input-chat-agent", from: "input-telegram-chat", to: "agent-chat" },
+        { id: "input-dashboard-output", from: "input-dashboard", to: "output-dashboard" },
         { id: "chat-openrouter", from: "agent-chat", to: "tool-openrouter" },
         { id: "openrouter-chat", from: "tool-openrouter", to: "agent-chat" },
         { id: "chat-tools", from: "agent-chat", to: "tool-agent-tools" },
         { id: "tools-memory", from: "tool-agent-tools", to: "storage-memory" },
+        { id: "tools-notes", from: "tool-agent-tools", to: "storage-notes" },
         { id: "tools-drive", from: "tool-agent-tools", to: "storage-drive" },
         { id: "tools-calendar", from: "tool-agent-tools", to: "storage-calendar" },
+        { id: "tools-ops", from: "tool-agent-tools", to: "tool-observability" },
         { id: "memory-chat", from: "storage-memory", to: "agent-chat" },
+        { id: "notes-chat", from: "storage-notes", to: "agent-chat" },
         { id: "drive-chat", from: "storage-drive", to: "agent-chat" },
         { id: "calendar-chat", from: "storage-calendar", to: "agent-chat" },
+        { id: "openrouter-ops", from: "tool-openrouter", to: "tool-observability" },
+        { id: "observability-ops", from: "tool-observability", to: "storage-ops" },
         { id: "chat-output", from: "agent-chat", to: "output-telegram-reply" },
         { id: "input-upload-parser", from: "input-telegram-upload", to: "tool-parser" },
         { id: "parser-vision", from: "tool-parser", to: "agent-vision" },
@@ -846,6 +886,10 @@
         { id: "tools-google", from: "tool-agent-tools", to: "tool-google-clients" },
         { id: "drive-parser", from: "storage-drive", to: "tool-parser" },
         { id: "parser-chat", from: "tool-parser", to: "agent-chat" },
+        { id: "memory-dashboard", from: "storage-memory", to: "output-dashboard" },
+        { id: "notes-dashboard", from: "storage-notes", to: "output-dashboard" },
+        { id: "drive-dashboard", from: "storage-drive", to: "output-dashboard" },
+        { id: "ops-dashboard", from: "storage-ops", to: "output-dashboard" },
       ];
       const edgeDefsById = new Map(edgeDefs.map((edge) => [edge.id, edge]));
       let edgeElements = new Map();
@@ -853,17 +897,21 @@
       const scenarios = {
         "telegram-chat": {
           title: "Telegram chat",
-          summary: "Plain-text requests enter the long-lived Chat Agent, which builds a memory-backed prompt, decides whether tools are needed, and returns a Telegram reply.",
-          note: "The highlighted path shows the full tool envelope the Chat Agent can reach. A specific turn may use only a subset of these branches.",
+          summary: "Plain-text requests enter the long-lived Chat Agent, which builds a memory-backed prompt, decides whether tools are needed, and returns a Telegram reply while recording model and ops telemetry.",
+          note: "The highlighted path shows the full tool envelope the Chat Agent can reach. A specific turn may use only a subset of these branches, including note reads or writes.",
           nodes: [
             "input-telegram-chat",
             "agent-chat",
             "tool-openrouter",
             "tool-agent-tools",
+            "tool-observability",
             "storage-memory",
+            "storage-notes",
             "storage-drive",
             "storage-calendar",
+            "storage-ops",
             "output-telegram-reply",
+            "output-dashboard",
           ],
           edges: [
             "input-chat-agent",
@@ -871,29 +919,38 @@
             "openrouter-chat",
             "chat-tools",
             "tools-memory",
+            "tools-notes",
             "tools-drive",
             "tools-calendar",
+            "tools-ops",
             "memory-chat",
+            "notes-chat",
             "drive-chat",
             "calendar-chat",
+            "openrouter-ops",
+            "observability-ops",
             "chat-output",
+            "notes-dashboard",
+            "ops-dashboard",
           ],
           steps: [
             "Telegram text reaches `JarvisAgent.chat(...)` through the single-user bot handler.",
             "The system prompt pulls in semantically relevant memories plus local time context before the model call.",
-            "The Chat Agent loops through OpenRouter, optionally calling local tools and managers for memory, Drive, calendar, or tasks.",
+            "The Chat Agent loops through OpenRouter, optionally calling local tools and managers for memory, notes, Drive, calendar, or tasks.",
+            "Model telemetry and side-effect audit events are written to local JSONL streams as the turn progresses.",
             "Tool results re-enter the loop, and the final answer is sent back as a Telegram reply.",
           ],
           sources: [
             { label: "Telegram ingress", path: "telegram_bot/bot.py", detail: "Routes plain-text messages to the chat loop." },
             { label: "Chat loop", path: "core/agent.py", detail: "Runs Anthropic-style tool calls and response assembly." },
             { label: "Prompt builder", path: "core/prompts.py", detail: "Injects relevant memories and time context into the system prompt." },
+            { label: "Notes workspace", path: "notes/service.py", detail: "Creates and appends collaborative Markdown notes in Obsidian." },
             { label: "Local storage", path: "memory/manager.py", detail: "Persists memories, tasks, and financial records in SQLite and ChromaDB." },
           ],
         },
         "telegram-upload": {
           title: "Telegram upload",
-          summary: "Files and photos bypass the chat loop, move through extraction and specialist agents, and finish with Drive storage, memory updates, and a filing confirmation.",
+          summary: "Files and photos bypass the chat loop, move through extraction and specialist agents, and finish with Drive storage, memory updates, observability logs, and a filing confirmation.",
           note: "Telegram uploads reuse the same model routing and storage helpers, but they do not instantiate the long-lived Chat Agent.",
           nodes: [
             "input-telegram-upload",
@@ -904,9 +961,12 @@
             "tool-google-clients",
             "storage-drive",
             "tool-agent-tools",
+            "tool-observability",
             "storage-memory",
             "agent-financial",
+            "storage-ops",
             "output-confirmation",
+            "output-dashboard",
           ],
           edges: [
             "input-upload-parser",
@@ -920,18 +980,22 @@
             "google-drive",
             "classification-tools",
             "tools-memory",
+            "tools-ops",
             "parser-financial",
             "financial-openrouter",
             "openrouter-financial",
             "financial-tools",
+            "openrouter-ops",
+            "observability-ops",
             "drive-confirmation",
             "memory-confirmation",
+            "ops-dashboard",
           ],
           steps: [
             "The Telegram upload handler downloads the file and extracts text when the format supports it.",
             "If the upload is image-heavy, the Vision Agent adds a richer description before classification.",
             "The Classification Agent chooses the Drive folder, output filename, and summary for the document.",
-            "Drive upload, local memory updates, and optional financial extraction complete before a confirmation goes back to Telegram.",
+            "Drive upload, local memory updates, optional financial extraction, and audit logging complete before a confirmation goes back to Telegram.",
           ],
           sources: [
             { label: "Upload handler", path: "telegram_bot/bot.py", detail: "Downloads Telegram files and orchestrates filing." },
@@ -942,7 +1006,7 @@
         },
         "gmail-filing": {
           title: "Gmail filing",
-          summary: "Unread messages are polled in the background, parsed, filtered for relevance, then filed to Drive and memory with activity tracking.",
+          summary: "Unread messages are polled in the background, parsed, filtered for relevance, then filed to Drive and memory with activity, issue, and audit tracking.",
           note: "The relevance stage is intentionally conservative. If validation fails, the watcher prefers filing over silently losing a useful document.",
           nodes: [
             "input-gmail-watcher",
@@ -953,10 +1017,13 @@
             "agent-classification",
             "storage-drive",
             "tool-agent-tools",
+            "tool-observability",
             "storage-memory",
             "agent-financial",
             "storage-activity",
+            "storage-ops",
             "output-watcher",
+            "output-dashboard",
           ],
           edges: [
             "input-gmail-google",
@@ -971,12 +1038,16 @@
             "google-drive",
             "classification-tools",
             "tools-memory",
+            "tools-ops",
             "parser-financial",
             "financial-openrouter",
             "openrouter-financial",
             "financial-tools",
+            "openrouter-ops",
+            "observability-ops",
             "google-activity",
             "activity-output",
+            "ops-dashboard",
           ],
           steps: [
             "The Gmail watcher polls unread mail through the Gmail client and parses each candidate message plus its attachments.",
@@ -993,30 +1064,37 @@
         },
         "drive-qa": {
           title: "Drive Q&A",
-          summary: "Document questions start in Telegram, then the Chat Agent searches Drive, reads the selected file, extracts text, and answers with file-backed context.",
+          summary: "Document questions start in Telegram, then the Chat Agent searches Drive, reads the selected file, extracts text, and answers with file-backed context while writing LLM telemetry.",
           note: "Drive Q&A is a chat turn that leans heavily on Drive search and read paths, rather than on direct memory recall alone.",
           nodes: [
             "input-telegram-chat",
             "agent-chat",
             "tool-openrouter",
             "tool-agent-tools",
+            "tool-observability",
             "tool-google-clients",
             "storage-drive",
             "tool-parser",
             "storage-memory",
+            "storage-ops",
             "output-telegram-reply",
+            "output-dashboard",
           ],
           edges: [
             "input-chat-agent",
             "chat-openrouter",
             "openrouter-chat",
             "chat-tools",
+            "tools-ops",
             "tools-google",
             "google-drive",
             "drive-parser",
             "parser-chat",
             "memory-chat",
+            "openrouter-ops",
+            "observability-ops",
             "chat-output",
+            "ops-dashboard",
           ],
           steps: [
             "A Telegram message asks about a stored document or requests a file lookup.",
@@ -1031,18 +1109,70 @@
             { label: "Extraction helpers", path: "utils/text_extraction.py", detail: "Turns downloaded files into text the agent can reason over." },
           ],
         },
+        "notes-observability": {
+          title: "Notes & observability",
+          summary: "Note-oriented chat requests use the same Chat Agent loop, but write into the shared Obsidian workspace while every model call and mutation is captured for the dashboard and `/llmops` views.",
+          note: "The dashboard is read-only. Notes are created or appended through the tool layer, then surfaced back through audit and telemetry streams.",
+          nodes: [
+            "input-telegram-chat",
+            "input-dashboard",
+            "agent-chat",
+            "tool-openrouter",
+            "tool-agent-tools",
+            "tool-observability",
+            "storage-memory",
+            "storage-notes",
+            "storage-ops",
+            "output-telegram-reply",
+            "output-dashboard",
+          ],
+          edges: [
+            "input-chat-agent",
+            "input-dashboard-output",
+            "chat-openrouter",
+            "openrouter-chat",
+            "chat-tools",
+            "tools-memory",
+            "tools-notes",
+            "tools-ops",
+            "memory-chat",
+            "notes-chat",
+            "openrouter-ops",
+            "observability-ops",
+            "chat-output",
+            "memory-dashboard",
+            "notes-dashboard",
+            "ops-dashboard",
+          ],
+          steps: [
+            "A Telegram request asks Marvis to capture or extend something in the shared notes workspace.",
+            "The Chat Agent decides whether it should search existing notes first, then creates or appends Markdown through the notes manager.",
+            "Every model call records LLM telemetry, while note writes emit audit events into the ops streams.",
+            "The dashboard and `/llmops` surfaces read those local JSONL files so you can inspect recent note mutations, model costs, and ops health.",
+          ],
+          sources: [
+            { label: "Chat loop", path: "core/agent.py", detail: "Exposes generic note tools and records LLM activity for each model call." },
+            { label: "Notes manager", path: "notes/service.py", detail: "Writes Markdown notes and emits audit events for note creation and append operations." },
+            { label: "LLMOps recorder", path: "core/llmops.py", detail: "Stores per-call latency, token usage, and estimated cost in local JSONL." },
+            { label: "Ops logger", path: "core/opslog.py", detail: "Persists heartbeats, warnings, errors, and audits with retention-aware pruning." },
+            { label: "Dashboard", path: "dashboard/app.py", detail: "Renders recent telemetry, issue trends, and audit history for operator inspection." },
+          ],
+        },
         "calendar-tasks": {
           title: "Calendar & tasks",
-          summary: "Date-driven requests start in chat, resolve against local time context, then update Google Calendar or local task storage before the answer comes back with absolute dates.",
+          summary: "Date-driven requests start in chat, resolve against local time context, then update Google Calendar or local task storage before the answer comes back with absolute dates and audit telemetry.",
           note: "Tasks stay local in SQLite, while calendar events flow through the Google Calendar client. The reply should still mention the resolved absolute date either way.",
           nodes: [
             "input-telegram-chat",
             "agent-chat",
             "tool-openrouter",
             "tool-agent-tools",
+            "tool-observability",
             "storage-memory",
             "storage-calendar",
+            "storage-ops",
             "output-telegram-reply",
+            "output-dashboard",
           ],
           edges: [
             "input-chat-agent",
@@ -1051,9 +1181,13 @@
             "chat-tools",
             "tools-memory",
             "tools-calendar",
+            "tools-ops",
             "memory-chat",
             "calendar-chat",
+            "openrouter-ops",
+            "observability-ops",
             "chat-output",
+            "ops-dashboard",
           ],
           steps: [
             "A Telegram request asks what is scheduled, creates an event, or explicitly asks for a task or reminder.",

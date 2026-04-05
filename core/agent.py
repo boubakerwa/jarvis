@@ -1,7 +1,10 @@
 import logging
+from datetime import datetime, timezone
+from time import monotonic
 from typing import Optional
 
 from config import settings
+from core.llmops import record_llm_call
 from core.llm_client import create_llm_client, get_model_name
 from core.prompts import build_system_prompt
 from core.time_utils import (
@@ -115,6 +118,76 @@ TOOLS: list[dict] = [
                 "file_id": {"type": "string", "description": "Google Drive file ID."},
             },
             "required": ["file_id"],
+        },
+    },
+    {
+        "name": "create_note",
+        "description": (
+            "Create a note in the shared Obsidian notes workspace. "
+            "Choose the folder and title that best fit the request."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Human-readable note title."},
+                "body": {"type": "string", "description": "Markdown note body."},
+                "folder": {"type": "string", "description": "Optional folder under the shared Marvis notes root."},
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional tags for note frontmatter.",
+                },
+                "note_type": {"type": "string", "description": "Optional note type to store in frontmatter."},
+                "unique": {"type": "boolean", "default": False},
+            },
+            "required": ["title"],
+        },
+    },
+    {
+        "name": "append_note",
+        "description": "Append Markdown content to an existing note in the shared Obsidian notes workspace.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Existing note path."},
+                "content": {"type": "string", "description": "Markdown content to append."},
+            },
+            "required": ["path", "content"],
+        },
+    },
+    {
+        "name": "search_notes",
+        "description": "Search the shared Obsidian notes workspace by filename and note content.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "What to search for in notes."},
+                "folder": {"type": "string", "description": "Optional folder under the Marvis notes root."},
+                "limit": {"type": "integer", "default": 5},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "read_note",
+        "description": "Read a note from the shared Obsidian workspace using its path.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Note path returned by search_notes or a save tool."},
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "list_recent_notes",
+        "description": "List recent notes from the shared Obsidian workspace.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "folder": {"type": "string", "description": "Optional folder under the Marvis notes root."},
+                "limit": {"type": "integer", "default": 8},
+            },
         },
     },
     {
@@ -242,11 +315,12 @@ TOOLS: list[dict] = [
 
 
 class JarvisAgent:
-    def __init__(self, memory_manager: MemoryManager, drive_client=None, calendar_client=None):
+    def __init__(self, memory_manager: MemoryManager, drive_client=None, calendar_client=None, notes_manager=None):
         self._client = create_llm_client()
         self._memory = memory_manager
         self._drive = drive_client
         self._calendar = calendar_client
+        self._notes = notes_manager
         self._history: list[dict] = []
         self._current_user_message = ""
 
@@ -277,17 +351,46 @@ class JarvisAgent:
         messages = list(self._history)
 
         while True:
-            response = self._client.messages.create(
-                model=get_model_name(),
-                max_tokens=settings.MAX_TOKENS,
-                system=system_prompt,
-                tools=TOOLS,
-                messages=messages,
-            )
+            model_name = get_model_name()
+            started_at = datetime.now(timezone.utc).isoformat()
+            started_clock = monotonic()
+            try:
+                response = self._client.messages.create(
+                    model=model_name,
+                    max_tokens=settings.MAX_TOKENS,
+                    system=system_prompt,
+                    tools=TOOLS,
+                    messages=messages,
+                )
+            except Exception as exc:
+                record_llm_call(
+                    task="chat",
+                    model=model_name,
+                    status="api_error",
+                    started_at=started_at,
+                    latency_ms=(monotonic() - started_clock) * 1000,
+                    error=str(exc),
+                    metadata={"channel": "chat", "history_messages": len(messages)},
+                )
+                raise
 
             # Collect all tool uses and text from this response
             tool_uses = [b for b in response.content if b.type == "tool_use"]
             text_blocks = [b for b in response.content if b.type == "text"]
+            record_llm_call(
+                task="chat",
+                model=model_name,
+                status="ok",
+                started_at=started_at,
+                latency_ms=(monotonic() - started_clock) * 1000,
+                response=response,
+                metadata={
+                    "channel": "chat",
+                    "history_messages": len(messages),
+                    "tool_use_count": len(tool_uses),
+                    "text_block_count": len(text_blocks),
+                },
+            )
 
             if response.stop_reason == "end_turn" or not tool_uses:
                 # Done — return combined text
@@ -322,6 +425,16 @@ class JarvisAgent:
                 return self._tool_search_drive(inputs)
             elif name == "read_drive_file":
                 return self._tool_read_drive_file(inputs)
+            elif name == "create_note":
+                return self._tool_create_note(inputs)
+            elif name == "append_note":
+                return self._tool_append_note(inputs)
+            elif name == "search_notes":
+                return self._tool_search_notes(inputs)
+            elif name == "read_note":
+                return self._tool_read_note(inputs)
+            elif name == "list_recent_notes":
+                return self._tool_list_recent_notes(inputs)
             elif name == "check_calendar":
                 return self._tool_check_calendar(inputs)
             elif name == "create_event":
@@ -421,6 +534,62 @@ class JarvisAgent:
         if len(text) > max_chars:
             text = text[:max_chars] + f"\n\n[...truncated — {len(text) - max_chars} more chars]"
         return f"Contents of '{filename}':\n\n{text}"
+
+    def _tool_create_note(self, inputs: dict) -> str:
+        if not self._notes:
+            return "Notes workspace not initialised."
+        result = self._notes.create_note(
+            title=inputs["title"],
+            body=inputs.get("body", ""),
+            folder=inputs.get("folder", ""),
+            tags=inputs.get("tags"),
+            note_type=inputs.get("note_type", ""),
+            unique=inputs.get("unique", False),
+        )
+        return f"Note created in {result['path']}."
+
+    def _tool_append_note(self, inputs: dict) -> str:
+        if not self._notes:
+            return "Notes workspace not initialised."
+        result = self._notes.append_note(inputs["path"], inputs["content"])
+        return f"Note updated: {result['path']}."
+
+    def _tool_search_notes(self, inputs: dict) -> str:
+        if not self._notes:
+            return "Notes workspace not initialised."
+        matches = self._notes.search_notes(
+            inputs["query"],
+            folder=inputs.get("folder"),
+            limit=inputs.get("limit", 5),
+        )
+        if not matches:
+            return "No notes found."
+        lines = []
+        for match in matches:
+            lines.append(
+                f"- {match['path']} ({match['modified_at']})\n  {match['snippet']}"
+            )
+        return "\n".join(lines)
+
+    def _tool_read_note(self, inputs: dict) -> str:
+        if not self._notes:
+            return "Notes workspace not initialised."
+        note = self._notes.read_note(inputs["path"])
+        return f"Contents of {note['path']}:\n\n{note['content']}"
+
+    def _tool_list_recent_notes(self, inputs: dict) -> str:
+        if not self._notes:
+            return "Notes workspace not initialised."
+        notes = self._notes.list_recent_notes(
+            folder=inputs.get("folder"),
+            limit=max(1, inputs.get("limit", 8)),
+        )
+        if not notes:
+            return "No notes found."
+        lines = []
+        for note in notes:
+            lines.append(f"- {note['path']} ({note['modified_at']})\n  {note['snippet']}")
+        return "\n".join(lines)
 
     def _tool_financial_summary(self, inputs: dict) -> str:
         from datetime import date, timedelta

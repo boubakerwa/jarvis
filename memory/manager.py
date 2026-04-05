@@ -7,6 +7,7 @@ from typing import Optional
 import chromadb
 
 from config import settings
+from core.opslog import record_audit
 from memory.schema import MemoryCategory, MemoryRecord
 
 logger = logging.getLogger(__name__)
@@ -94,6 +95,12 @@ class MemoryManager:
         self._sqlite_insert(record)
         self._chroma_upsert(record)
         logger.info("Memory upserted: topic=%s id=%s", record.topic, record.id)
+        record_audit(
+            event="memory_upserted",
+            component="memory",
+            summary="Stored or updated memory record",
+            metadata={"topic": record.topic, "category": record.category.value},
+        )
         return record
 
     def forget(self, topic: str) -> bool:
@@ -104,6 +111,12 @@ class MemoryManager:
         self._soft_delete(existing.id)
         self._chroma_delete(existing.id)
         logger.info("Memory forgotten: topic=%s", topic)
+        record_audit(
+            event="memory_forgotten",
+            component="memory",
+            summary="Forgot memory record by topic",
+            metadata={"topic": topic},
+        )
         return True
 
     def search(self, query: str, n_results: int = 8) -> list[MemoryRecord]:
@@ -158,6 +171,12 @@ class MemoryManager:
         )
         self._db.commit()
         logger.info("Task created: %s", description[:60])
+        record_audit(
+            event="task_created",
+            component="memory",
+            summary="Created task",
+            metadata={"due_date": due_date or ""},
+        )
         return {"id": task_id, "description": description, "due_date": due_date, "status": "pending"}
 
     def list_tasks(self, status: str = "pending") -> list[dict]:
@@ -179,6 +198,13 @@ class MemoryManager:
             (now, task_id),
         )
         self._db.commit()
+        if cursor.rowcount > 0:
+            record_audit(
+                event="task_completed",
+                component="memory",
+                summary="Completed task",
+                metadata={"task_id": task_id},
+            )
         return cursor.rowcount > 0
 
     # ------------------------------------------------------------------
@@ -207,6 +233,12 @@ class MemoryManager:
         )
         self._db.commit()
         logger.info("Financial record added: %s %.2f %s from %s", category, amount, currency, vendor)
+        record_audit(
+            event="financial_record_added",
+            component="memory",
+            summary="Stored financial record",
+            metadata={"vendor": vendor[:80], "category": category, "currency": currency},
+        )
         return {
             "id": record_id,
             "vendor": vendor,

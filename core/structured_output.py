@@ -5,8 +5,11 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
+from time import monotonic
 from typing import Any, Callable, Optional
 
+from core.llmops import record_llm_call
 from core.llm_client import create_llm_client, get_model_candidates
 
 logger = logging.getLogger(__name__)
@@ -75,14 +78,49 @@ def generate_validated_json(
         if system:
             request["system"] = system
 
-        response = client.messages.create(**request)
+        started_at = datetime.now(timezone.utc).isoformat()
+        started_clock = monotonic()
+        try:
+            response = client.messages.create(**request)
+        except Exception as exc:
+            record_llm_call(
+                task=task,
+                model=model,
+                status="api_error",
+                started_at=started_at,
+                latency_ms=(monotonic() - started_clock) * 1000,
+                error=str(exc),
+                metadata={"channel": "structured_output"},
+            )
+            raise
+
         raw = response_text(response)
 
         try:
             data = extract_json_object(raw)
-            return validator(data)
+            validated = validator(data)
+            record_llm_call(
+                task=task,
+                model=model,
+                status="ok",
+                started_at=started_at,
+                latency_ms=(monotonic() - started_clock) * 1000,
+                response=response,
+                metadata={"channel": "structured_output"},
+            )
+            return validated
         except Exception as exc:
             last_error = exc
+            record_llm_call(
+                task=task,
+                model=model,
+                status="validation_error",
+                started_at=started_at,
+                latency_ms=(monotonic() - started_clock) * 1000,
+                response=response,
+                error=str(exc),
+                metadata={"channel": "structured_output"},
+            )
             logger.warning(
                 "Structured output validation failed for task=%s model=%s: %s",
                 task,

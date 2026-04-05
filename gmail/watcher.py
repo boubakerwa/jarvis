@@ -8,6 +8,7 @@ import logging
 import os
 import time
 from datetime import date, datetime, time as dt_time
+from time import monotonic
 from typing import Callable, Optional
 
 from google.auth.transport.requests import Request
@@ -16,6 +17,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
 from config import settings
+from core.opslog import new_op_id, operation_context, record_activity, record_issue
 from gmail.parser import ParsedEmail, parse_message
 
 logger = logging.getLogger(__name__)
@@ -32,26 +34,63 @@ class GmailWatcher:
         self._service = self._build_service()
         self._cutoff_date, self._last_history_id = self._load_state()
         logger.info("Gmail watcher cutoff date: %s", self._cutoff_date)
+        record_activity(
+            event="gmail_watcher_initialised",
+            component="gmail",
+            summary="Gmail watcher initialised",
+            metadata={"cutoff_date": self._cutoff_date},
+        )
 
     def run_forever(self) -> None:
         """Block and poll Gmail indefinitely."""
         logger.info("Gmail watcher started. Poll interval: %ds", settings.GMAIL_POLL_INTERVAL)
+        record_activity(
+            event="gmail_watcher_started",
+            component="gmail",
+            summary="Gmail watcher started",
+            metadata={"poll_interval_seconds": settings.GMAIL_POLL_INTERVAL},
+        )
         while True:
+            op_id = new_op_id("gmail-poll")
+            started = monotonic()
             try:
-                self._poll()
+                with operation_context(op_id):
+                    unread_count = self._poll()
+                record_activity(
+                    event="gmail_poll_completed",
+                    component="gmail",
+                    summary="Gmail poll completed",
+                    duration_ms=(monotonic() - started) * 1000,
+                    op_id=op_id,
+                    metadata={"unread_count": unread_count},
+                )
             except Exception:
                 logger.exception("Error during Gmail poll")
+                record_issue(
+                    level="ERROR",
+                    event="gmail_poll_failed",
+                    component="gmail",
+                    status="error",
+                    summary="Gmail poll failed",
+                    duration_ms=(monotonic() - started) * 1000,
+                    op_id=op_id,
+                )
             time.sleep(settings.GMAIL_POLL_INTERVAL)
 
     # ------------------------------------------------------------------
     # Polling
     # ------------------------------------------------------------------
 
-    def _poll(self) -> None:
+    def _poll(self) -> int:
         unread = self._fetch_unread_ids()
         if not unread:
             logger.debug("No new unread emails")
-            return
+            record_activity(
+                event="gmail_poll_empty",
+                component="gmail",
+                summary="No new unread emails",
+            )
+            return 0
 
         logger.info("Processing %d new email(s)", len(unread))
         for message_id in unread:
@@ -62,6 +101,15 @@ class GmailWatcher:
                 self._save_state(message_id)
             except Exception:
                 logger.exception("Failed to process message %s", message_id)
+                record_issue(
+                    level="ERROR",
+                    event="gmail_message_processing_failed",
+                    component="gmail",
+                    status="error",
+                    summary="Failed to process Gmail message",
+                    metadata={"message_id": message_id},
+                )
+        return len(unread)
 
     def _fetch_unread_ids(self) -> list[str]:
         cutoff = date.fromisoformat(self._cutoff_date)
