@@ -9,6 +9,8 @@ import threading
 from datetime import datetime, timezone
 from typing import Optional
 
+from config import settings
+
 # Ensure data/ and logs/ directories exist before anything else
 os.makedirs("data", exist_ok=True)
 os.makedirs("logs", exist_ok=True)
@@ -188,12 +190,32 @@ def main():
         logger.warning("Calendar client failed to initialise — calendar features disabled")
         calendar_client = None
 
+    # Notes
+    if settings.OBSIDIAN_VAULT_PATH:
+        from notes import NotesManager, ObsidianVault
+
+        notes_manager = NotesManager(
+            ObsidianVault(
+                settings.OBSIDIAN_VAULT_PATH,
+                root_folder=settings.OBSIDIAN_ROOT_FOLDER,
+            )
+        )
+        logger.info(
+            "Notes workspace initialised (%s/%s)",
+            settings.OBSIDIAN_VAULT_PATH,
+            settings.OBSIDIAN_ROOT_FOLDER,
+        )
+    else:
+        logger.info("Notes workspace disabled (set OBSIDIAN_VAULT_PATH to enable)")
+        notes_manager = None
+
     # Agent
     from core.agent import JarvisAgent
     agent = JarvisAgent(
         memory_manager=memory_manager,
         drive_client=drive_client,
         calendar_client=calendar_client,
+        notes_manager=notes_manager,
     )
     logger.info("Agent initialised")
 
@@ -215,6 +237,7 @@ def main():
         memory_manager=memory_manager,
         drive_client=drive_client,
         calendar_client=calendar_client,
+        notes_manager=notes_manager,
     )
     bot.run()
 

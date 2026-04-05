@@ -22,11 +22,12 @@ logger = logging.getLogger(__name__)
 
 
 class TelegramBot:
-    def __init__(self, agent, memory_manager, drive_client=None, calendar_client=None):
+    def __init__(self, agent, memory_manager, drive_client=None, calendar_client=None, notes_manager=None):
         self._agent = agent
         self._memory = memory_manager
         self._drive = drive_client
         self._calendar = calendar_client
+        self._notes = notes_manager
         self._app = (
             Application.builder()
             .token(settings.TELEGRAM_BOT_TOKEN)
@@ -129,12 +130,14 @@ class TelegramBot:
         memory_count = self._memory.count()
         drive_status = "connected" if self._drive else "not initialised"
         calendar_status = "connected" if self._calendar else "not initialised"
+        notes_status = "connected" if self._notes else "not initialised"
 
         lines = [
             f"*Marvis Status*",
             f"Memories: {memory_count}",
             f"Drive: {drive_status}",
             f"Calendar: {calendar_status}",
+            f"Notes: {notes_status}",
             f"Model: {settings.OPENROUTER_MODEL}",
         ]
         await update.message.reply_text("\n".join(lines), parse_mode="Markdown")

@@ -47,6 +47,7 @@ That gives you an assistant that can actually do useful local work:
 | Gmail watcher | scans unread mail after a cutoff date, filters low-value mail, files useful attachments |
 | Google Drive filing | classifies uploads and attachments into a fixed folder structure with predictable names |
 | Memory | stores durable facts, preferences, decisions, and document references in SQLite plus ChromaDB |
+| Obsidian notes | writes collaborative Markdown notes into a shared vault with Marvis-chosen organization |
 | Dashboard | shows overview, memory, Drive files, activity, and interactive docs |
 | Docs | ships with local architecture docs plus a Medium-ready article draft |
 
@@ -139,6 +140,7 @@ This turned out to matter more than prompt polish. The biggest failures in agent
 | Smart filing | Classifies documents and uploads them into a structured Google Drive library |
 | Financial extraction | Pulls vendor, amount, date, and category from finance-oriented documents |
 | Telegram bot | Single-user bot with slash commands, uploads, and long-polling deployment |
+| Obsidian integration | Writes collaborative Markdown notes into a configurable vault path |
 | Dashboard | Overview, memory browser, Drive mirror, activity log, and interactive docs |
 | Article-ready docs | Includes a Medium draft that explains the architecture and tradeoffs |
 
@@ -177,6 +179,8 @@ GOOGLE_CREDENTIALS_PATH=.credentials.json
 GOOGLE_TOKEN_PATH=token.json
 
 JARVIS_TIMEZONE=Europe/Berlin
+OBSIDIAN_VAULT_PATH=/absolute/path/to/your/Obsidian/vault
+OBSIDIAN_ROOT_FOLDER=.
 
 # Optional lower-risk Gemma routing:
 # OPENROUTER_MODEL_RELEVANCE=google/gemma-4-31b-it
@@ -230,6 +234,18 @@ Each memory is stored as a structured record:
 | `supersedes` | UUID of the record it replaced |
 
 Before each model call, the top relevant memories are retrieved from ChromaDB and injected into the system prompt.
+
+## Obsidian Notes
+
+If you set `OBSIDIAN_VAULT_PATH`, Marvis writes into that vault as a shared notes workspace. Set `OBSIDIAN_ROOT_FOLDER=.` if you want it to write directly at the vault root, or set a folder name if you want everything grouped under a subfolder. This works especially well with iCloud on Apple devices because Marvis only writes plain Markdown files.
+
+Marvis is not locked into a preset folder taxonomy. The agent can choose the note title, folder, and structure that best fit the request, then reuse or extend existing notes through search and append operations.
+
+Once enabled, you can ask things like:
+
+- `Please add a leather weekender bag as a gift idea for my wife`
+- `Please write a new article draft for local-first assistants`
+- `What are my hottest project ideas right now?`
 
 ## Drive Filing Layout
 
