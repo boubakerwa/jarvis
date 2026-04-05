@@ -6,7 +6,7 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload, MediaIoBaseUpload
+from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload, MediaIoBaseUpload
 import io
 
 from config import settings
@@ -138,6 +138,36 @@ class DriveClient:
     # ------------------------------------------------------------------
     # Search
     # ------------------------------------------------------------------
+
+    def download_file(self, file_id: str) -> tuple[bytes, str, str]:
+        """Download a file from Drive. Returns (data, filename, mime_type)."""
+        meta = self._service.files().get(
+            fileId=file_id, fields="name,mimeType"
+        ).execute()
+        filename = meta.get("name", "unknown")
+        mime_type = meta.get("mimeType", "application/octet-stream")
+
+        # Google-native formats: export to a readable format
+        google_export_map = {
+            "application/vnd.google-apps.document": ("application/pdf", ".pdf"),
+            "application/vnd.google-apps.spreadsheet": ("text/csv", ".csv"),
+            "application/vnd.google-apps.presentation": ("application/pdf", ".pdf"),
+        }
+        if mime_type in google_export_map:
+            export_mime, ext = google_export_map[mime_type]
+            data = self._service.files().export(
+                fileId=file_id, mimeType=export_mime
+            ).execute()
+            return bytes(data), filename + ext, export_mime
+
+        # Regular files
+        request = self._service.files().get_media(fileId=file_id)
+        buf = io.BytesIO()
+        downloader = MediaIoBaseDownload(buf, request)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+        return buf.getvalue(), filename, mime_type
 
     def search(self, query: str, max_results: int = 10) -> list[dict]:
         """Search Drive files by name. Returns list of {id, name, mimeType}."""

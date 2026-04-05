@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Marvis mark">
+  <rect x="8" y="8" width="48" height="48" rx="11" fill="none" stroke="#2b2b31" stroke-width="2"/>
+  <path d="M16 44V20l10 13 10-13v24" fill="none" stroke="#00ff9f" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M48 20v18" fill="none" stroke="#00ff9f" stroke-width="3" stroke-linecap="round"/>
+  <circle cx="48" cy="43" r="1.5" fill="#00ff9f"/>
+</svg>

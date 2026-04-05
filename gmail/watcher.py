@@ -3,9 +3,11 @@ Gmail polling loop. Checks for new unread emails every GMAIL_POLL_INTERVAL secon
 Marks emails as read after processing. Persists last-processed message ID to avoid
 re-processing on restart.
 """
+import json
 import logging
 import os
 import time
+from datetime import date, datetime, time as dt_time
 from typing import Callable, Optional
 
 from google.auth.transport.requests import Request
@@ -28,7 +30,8 @@ class GmailWatcher:
         """
         self._on_email = on_email
         self._service = self._build_service()
-        self._last_history_id: Optional[str] = self._load_state()
+        self._cutoff_date, self._last_history_id = self._load_state()
+        logger.info("Gmail watcher cutoff date: %s", self._cutoff_date)
 
     def run_forever(self) -> None:
         """Block and poll Gmail indefinitely."""
@@ -61,13 +64,51 @@ class GmailWatcher:
                 logger.exception("Failed to process message %s", message_id)
 
     def _fetch_unread_ids(self) -> list[str]:
-        result = self._service.users().messages().list(
+        cutoff = date.fromisoformat(self._cutoff_date)
+        query_anchor = cutoff.strftime("%Y/%m/%d")
+        query = f"is:unread after:{query_anchor}"
+
+        page_token = None
+        unread_ids: list[str] = []
+        ignored_count = 0
+
+        while True:
+            result = self._service.users().messages().list(
+                userId="me",
+                q=query,
+                maxResults=100,
+                pageToken=page_token,
+                fields="messages(id),nextPageToken",
+            ).execute()
+            messages = result.get("messages", [])
+
+            for message in messages:
+                if self._is_on_or_after_cutoff(message["id"]):
+                    unread_ids.append(message["id"])
+                else:
+                    ignored_count += 1
+
+            page_token = result.get("nextPageToken")
+            if not page_token:
+                break
+
+        if ignored_count:
+            logger.info(
+                "Ignoring %d unread email(s) before cutoff date %s",
+                ignored_count,
+                self._cutoff_date,
+            )
+        return unread_ids
+
+    def _is_on_or_after_cutoff(self, message_id: str) -> bool:
+        meta = self._service.users().messages().get(
             userId="me",
-            q="is:unread",
-            maxResults=50,
+            id=message_id,
+            format="minimal",
+            fields="id,internalDate",
         ).execute()
-        messages = result.get("messages", [])
-        return [m["id"] for m in messages]
+        internal_date_ms = int(meta.get("internalDate", "0"))
+        return internal_date_ms >= self._cutoff_timestamp_ms()
 
     def _mark_read(self, message_id: str) -> None:
         self._service.users().messages().modify(
@@ -83,14 +124,45 @@ class GmailWatcher:
     def _save_state(self, last_id: str) -> None:
         os.makedirs(os.path.dirname(os.path.abspath(_STATE_FILE)), exist_ok=True)
         with open(_STATE_FILE, "w") as f:
-            f.write(last_id)
+            json.dump(
+                {
+                    "cutoff_date": self._cutoff_date,
+                    "last_message_id": last_id,
+                },
+                f,
+            )
         self._last_history_id = last_id
 
-    def _load_state(self) -> Optional[str]:
+    def _load_state(self) -> tuple[str, Optional[str]]:
+        cutoff_date = self._default_cutoff_date()
         if os.path.exists(_STATE_FILE):
             with open(_STATE_FILE) as f:
-                return f.read().strip() or None
-        return None
+                raw = f.read().strip()
+            if not raw:
+                return cutoff_date, None
+
+            if raw.startswith("{"):
+                try:
+                    data = json.loads(raw)
+                    return cutoff_date, data.get("last_message_id")
+                except json.JSONDecodeError:
+                    logger.warning("Invalid gmail state file detected, resetting state.")
+                    return cutoff_date, None
+
+            # Legacy state file: preserve the last message id, but initialize the cutoff fresh.
+            return cutoff_date, raw
+        return cutoff_date, None
+
+    def _default_cutoff_date(self) -> str:
+        if settings.GMAIL_START_DATE:
+            return settings.GMAIL_START_DATE
+        return datetime.now().astimezone().date().isoformat()
+
+    def _cutoff_timestamp_ms(self) -> int:
+        cutoff = date.fromisoformat(self._cutoff_date)
+        tz = datetime.now().astimezone().tzinfo
+        cutoff_dt = datetime.combine(cutoff, dt_time.min, tzinfo=tz)
+        return int(cutoff_dt.timestamp() * 1000)
 
     # ------------------------------------------------------------------
     # Auth

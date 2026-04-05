@@ -1,0 +1,650 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Marvis docs</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0e0e10;
+      --surface: #1c1c21;
+      --surface-2: #151518;
+      --border: #2b2b31;
+      --text: #f0f0f0;
+      --muted: #9ca3af;
+      --accent: #00ff9f;
+      --accent-2: #00e0ff;
+      --warn: #f59e0b;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.55 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+    a { color: var(--accent-2); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .wrap {
+      max-width: 1220px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 16px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 18px;
+    }
+    h1, h2, h3, p { margin: 0; }
+    h1 { font-size: 20px; font-weight: 600; }
+    h2 { font-size: 16px; font-weight: 600; margin-bottom: 10px; }
+    h3 { font-size: 14px; font-weight: 600; margin-bottom: 8px; }
+    .muted { color: var(--muted); }
+    .topline {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 16px;
+      color: var(--muted);
+    }
+    .topline code, .note code, .panel code, .setup code {
+      color: #d1d5db;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      padding: 1px 5px;
+    }
+    .tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 18px;
+    }
+    .tab {
+      appearance: none;
+      border: 0;
+      background: transparent;
+      padding: 0 0 4px;
+      color: var(--muted);
+      cursor: pointer;
+      font: inherit;
+      border-bottom: 1px solid transparent;
+    }
+    .tab.active {
+      color: var(--text);
+      border-bottom-color: var(--accent);
+    }
+    .panel {
+      display: none;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      padding: 16px;
+      margin-bottom: 12px;
+    }
+    .panel.active { display: block; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .box {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      padding: 12px;
+      min-height: 84px;
+    }
+    .stack { display: grid; gap: 10px; }
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 10px;
+      align-items: stretch;
+    }
+    .flow.compact { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .node, .leaf {
+      border: 1px solid var(--border);
+      background: #111214;
+      padding: 10px 12px;
+      min-height: 72px;
+    }
+    .node strong, .leaf strong { display: block; margin-bottom: 4px; }
+    .arrow {
+      display: grid;
+      place-items: center;
+      color: var(--accent);
+      font-size: 18px;
+      line-height: 1;
+      padding: 0 2px;
+    }
+    .diagram-note {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    ul, ol { margin: 8px 0 0; padding-left: 20px; }
+    li + li { margin-top: 6px; }
+    .table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 10px;
+    }
+    .table th, .table td {
+      text-align: left;
+      vertical-align: top;
+      padding: 8px 10px 8px 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .table th { color: var(--muted); font-weight: 500; width: 160px; }
+    .callout {
+      border-left: 2px solid var(--warn);
+      padding-left: 12px;
+      color: var(--muted);
+      margin-top: 12px;
+    }
+    .note {
+      margin-top: 12px;
+      padding: 12px;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+    }
+    .kbd {
+      display: inline-block;
+      border: 1px solid var(--border);
+      background: #111214;
+      padding: 1px 6px;
+      margin: 0 2px;
+    }
+    .section-link {
+      display: inline-block;
+      margin-right: 12px;
+      margin-top: 6px;
+    }
+    .architecture-intro {
+      color: var(--muted);
+      max-width: 92ch;
+      margin-bottom: 12px;
+    }
+    .scenario-tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .scenario-tab {
+      appearance: none;
+      border: 1px solid var(--border);
+      background: #111214;
+      color: var(--muted);
+      cursor: pointer;
+      font: inherit;
+      padding: 8px 10px;
+      transition: border-color 0.2s ease, color 0.2s ease, background 0.2s ease, transform 0.2s ease;
+    }
+    .scenario-tab:hover,
+    .scenario-tab:focus-visible {
+      color: var(--text);
+      border-color: var(--accent-2);
+      outline: none;
+      transform: translateY(-1px);
+    }
+    .scenario-tab.active {
+      color: var(--text);
+      border-color: var(--accent);
+      background: linear-gradient(180deg, rgba(0, 255, 159, 0.12), rgba(0, 224, 255, 0.06));
+      box-shadow: inset 0 0 0 1px rgba(0, 255, 159, 0.16);
+    }
+    .architecture-shell {
+      margin-top: 12px;
+    }
+    .architecture-caption {
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .architecture-scroll {
+      overflow-x: auto;
+      padding-bottom: 6px;
+      margin-top: 12px;
+    }
+    .architecture-map {
+      position: relative;
+      min-width: 1080px;
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 12px;
+      padding: 2px;
+    }
+    .architecture-lane {
+      position: relative;
+      z-index: 1;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      padding: 12px;
+      min-height: 372px;
+    }
+    .lane-label {
+      color: var(--muted);
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      margin-bottom: 10px;
+      text-transform: uppercase;
+    }
+    .lane-stack {
+      display: grid;
+      gap: 10px;
+    }
+    .arch-node {
+      display: block;
+      width: 100%;
+      text-align: left;
+      border: 1px solid var(--border);
+      background: #111214;
+      color: var(--text);
+      cursor: pointer;
+      font: inherit;
+      min-height: 82px;
+      padding: 10px 12px;
+      position: relative;
+      transition: border-color 0.2s ease, background 0.2s ease, box-shadow 0.2s ease, opacity 0.2s ease, transform 0.2s ease;
+    }
+    .arch-node:hover,
+    .arch-node:focus-visible {
+      border-color: var(--accent-2);
+      outline: none;
+      transform: translateY(-1px);
+    }
+    .arch-node strong {
+      display: block;
+      margin-bottom: 4px;
+    }
+    .arch-node span:last-child {
+      color: var(--muted);
+      display: block;
+    }
+    .node-kicker {
+      color: var(--accent-2);
+      display: block;
+      font-size: 12px;
+      letter-spacing: 0.06em;
+      margin-bottom: 6px;
+      text-transform: uppercase;
+    }
+    .arch-node.is-active {
+      background: linear-gradient(180deg, rgba(0, 255, 159, 0.10), rgba(0, 224, 255, 0.04));
+      border-color: var(--accent);
+      box-shadow: 0 0 0 1px rgba(0, 255, 159, 0.14);
+    }
+    .arch-node.is-inspected {
+      border-color: var(--accent-2);
+      box-shadow: 0 0 0 1px rgba(0, 224, 255, 0.18);
+    }
+    .arch-node.is-dim {
+      opacity: 0.42;
+    }
+    .arch-edge-layer {
+      inset: 0;
+      overflow: visible;
+      pointer-events: none;
+      position: absolute;
+      z-index: 0;
+    }
+    .arch-edge {
+      fill: none;
+      opacity: 0.28;
+      stroke: rgba(156, 163, 175, 0.22);
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      stroke-width: 2;
+      transition: opacity 0.2s ease, stroke 0.2s ease, stroke-width 0.2s ease, filter 0.2s ease;
+    }
+    .arch-edge.is-active {
+      animation: dashFlow 14s linear infinite;
+      filter: drop-shadow(0 0 4px rgba(0, 255, 159, 0.24));
+      opacity: 0.96;
+      stroke: var(--accent);
+      stroke-dasharray: 7 7;
+      stroke-width: 2.6;
+    }
+    .arch-edge.is-inspected {
+      filter: drop-shadow(0 0 4px rgba(0, 224, 255, 0.22));
+      opacity: 1;
+      stroke: var(--accent-2);
+      stroke-width: 3;
+    }
+    .arch-edge.is-dim {
+      opacity: 0.08;
+    }
+    @keyframes dashFlow {
+      to { stroke-dashoffset: -28; }
+    }
+    .architecture-meta {
+      display: grid;
+      gap: 12px;
+      grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.95fr);
+      margin-top: 12px;
+    }
+    .story-summary {
+      color: var(--muted);
+    }
+    .story-steps {
+      margin-top: 10px;
+    }
+    .story-note {
+      color: var(--muted);
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid var(--border);
+    }
+    .source-grid {
+      display: grid;
+      gap: 10px;
+      margin-top: 10px;
+    }
+    .source-card {
+      background: #111214;
+      border: 1px solid var(--border);
+      padding: 10px 12px;
+    }
+    .source-card strong {
+      display: block;
+      margin-bottom: 4px;
+    }
+    .source-card code {
+      display: inline-block;
+      margin-top: 6px;
+    }
+    .source-card p {
+      color: var(--muted);
+    }
+    .route-flow {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 12px;
+    }
+    .route-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 12px;
+    }
+    .route-card {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      padding: 12px;
+    }
+    .route-tag {
+      display: inline-block;
+      margin-bottom: 8px;
+      padding: 2px 8px;
+      border: 1px solid var(--border);
+      background: #111214;
+      color: var(--accent-2);
+      font-size: 12px;
+    }
+    .route-card p {
+      color: var(--muted);
+    }
+    .route-card code {
+      display: inline-block;
+      margin-top: 8px;
+    }
+    @media (max-width: 980px) {
+      .grid, .flow, .flow.compact { grid-template-columns: 1fr; }
+      .arrow { transform: rotate(90deg); min-height: 18px; }
+      header { align-items: flex-start; flex-direction: column; }
+      .wrap { padding: 16px; }
+      .table th { width: 120px; }
+      .architecture-meta, .route-grid { grid-template-columns: 1fr; }
+      .route-flow { grid-template-columns: 1fr; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      .scenario-tab,
+      .arch-node,
+      .arch-edge {
+        animation: none;
+        transition: none;
+      }
+      .arch-edge.is-active {
+        stroke-dasharray: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div>
+        <h1>Marvis docs</h1>
+        <div class="muted">Marvis is the local assistant that watches Gmail, files documents, keeps memory, and talks over Telegram.</div>
+      </div>
+      <div class="muted">Standalone file: <code>docs/index.html</code></div>
+    </header>
+
+    <div class="topline">
+      <span>Open dashboard: <a href="http://127.0.0.1:8080/">127.0.0.1:8080</a></span>
+      <span>Docs route: <a href="http://127.0.0.1:8080/docs">/docs</a></span>
+    </div>
+
+    <div class="tabs" role="tablist" aria-label="Marvis documentation sections">
+      <button class="tab active" type="button" data-target="overview">Overview</button>
+      <button class="tab" type="button" data-target="setup">Setup</button>
+      <button class="tab" type="button" data-target="telegram">Telegram</button>
+      <button class="tab" type="button" data-target="gmail">Gmail</button>
+      <button class="tab" type="button" data-target="architecture">Architecture</button>
+      <button class="tab" type="button" data-target="routing">Routing</button>
+    </div>
+
+    <section class="panel active" id="overview" data-panel>
+      <h2>What Marvis does</h2>
+      <div class="grid">
+        <div class="box">
+          <h3>Assistant loop</h3>
+          <p>Marvis answers Telegram messages through the agent loop, with memory, Drive search, calendar, task, and financial tools available when needed.</p>
+        </div>
+        <div class="box">
+          <h3>Background watcher</h3>
+          <p>It polls Gmail on a timer, decides whether a message is worth filing, extracts attachments, classifies them, and stores them in Drive plus memory.</p>
+        </div>
+      </div>
+
+      <div class="note">
+        <strong>Quick map</strong>
+        <div class="flow" style="margin-top:10px">
+          <div class="node"><strong>Telegram</strong><span>chat, commands, file uploads</span></div>
+          <div class="arrow">→</div>
+          <div class="node"><strong>Core agent</strong><span><code>core/agent.py</code></span></div>
+          <div class="arrow">→</div>
+          <div class="node"><strong>Tools</strong><span>memory, Drive, calendar, tasks</span></div>
+        </div>
+        <div class="flow compact" style="margin-top:12px">
+          <div class="leaf"><strong>Gmail watcher</strong><span>polls unread mail, files attachments</span></div>
+          <div class="leaf"><strong>OpenRouter</strong><span>model calls stay Anthropic-shaped</span></div>
+          <div class="leaf"><strong>SQLite + ChromaDB</strong><span>memory, tasks, financial records</span></div>
+        </div>
+      </div>
+
+      <div class="callout">
+        Some internal filenames still use `jarvis` for the moment, but the app name shown in the docs and UI is Marvis.
+      </div>
+    </section>
+
+    <section class="panel" id="setup" data-panel>
+      <h2>Setup and how to run</h2>
+      <ol>
+        <li>Install Python 3.12, create a virtual environment, and install the requirements.</li>
+        <li>Copy <code>.env.example</code> to <code>.env</code> and fill in OpenRouter, Telegram, and Google credentials.</li>
+        <li>Create Google OAuth credentials with Gmail, Drive, and Calendar scopes, then authorize once so <code>token.json</code> is created.</li>
+        <li>Start the app with <code>python main.py</code>.</li>
+        <li>Open the dashboard at <code>http://127.0.0.1:8080/</code> and this docs page at <code>/docs</code>.</li>
+      </ol>
+
+      <table class="table" aria-label="Key environment variables">
+        <tr><th>OpenRouter</th><td><code>OPENROUTER_API_KEY</code>, <code>OPENROUTER_MODEL</code>, optional task-specific model overrides</td></tr>
+        <tr><th>Telegram</th><td><code>TELEGRAM_BOT_TOKEN</code>, <code>TELEGRAM_ALLOWED_USER_ID</code></td></tr>
+        <tr><th>Google</th><td><code>GOOGLE_CREDENTIALS_PATH</code>, <code>GOOGLE_TOKEN_PATH</code></td></tr>
+        <tr><th>Runtime</th><td><code>GMAIL_POLL_INTERVAL</code>, <code>GMAIL_START_DATE</code>, <code>JARVIS_TIMEZONE</code></td></tr>
+      </table>
+
+      <div class="note">
+        <strong>Useful commands</strong>
+        <div style="margin-top:8px">
+          <div><code>python main.py</code> - run Marvis</div>
+          <div><code>python -m dashboard</code> - run the local dashboard only</div>
+          <div><code>http://127.0.0.1:8080/docs</code> - open these docs in the browser</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel" id="telegram" data-panel>
+      <h2>Telegram usage</h2>
+      <div class="flow compact">
+        <div class="leaf"><strong>User message</strong><span>plain text goes into the agent loop</span></div>
+        <div class="leaf"><strong>Commands</strong><span><code>/status</code>, <code>/memories</code>, <code>/forget</code>, <code>/reset</code></span></div>
+        <div class="leaf"><strong>Uploads</strong><span>documents and photos are filed to Drive</span></div>
+      </div>
+
+      <table class="table" aria-label="Telegram commands">
+        <tr><th>Any text</th><td>Passed to the agent as a normal chat message.</td></tr>
+        <tr><th><code>/memories</code></th><td>Lists stored memories grouped by category.</td></tr>
+        <tr><th><code>/forget &lt;topic&gt;</code></th><td>Deletes a memory by topic.</td></tr>
+        <tr><th><code>/reset</code></th><td>Clears conversation history only. Long-term memory stays intact.</td></tr>
+        <tr><th><code>/status</code></th><td>Shows memory count, Drive state, Calendar state, and current model.</td></tr>
+      </table>
+
+      <div class="note">
+        Telegram is single-user by design: the bot only accepts messages from the configured allowed user ID.
+      </div>
+    </section>
+
+    <section class="panel" id="gmail" data-panel>
+      <h2>Gmail watcher behavior</h2>
+      <div class="flow">
+        <div class="node"><strong>1. Poll</strong><span>reads unread mail every <code>GMAIL_POLL_INTERVAL</code> seconds</span></div>
+        <div class="arrow">→</div>
+        <div class="node"><strong>2. Parse</strong><span>extracts text, metadata, and attachments</span></div>
+        <div class="arrow">→</div>
+        <div class="node"><strong>3. Relevance</strong><span>skips newsletters, OTPs, and noisy notifications</span></div>
+        <div class="arrow">→</div>
+        <div class="node"><strong>4. File</strong><span>classify attachment, upload to Drive, write memory</span></div>
+      </div>
+
+      <table class="table" aria-label="Gmail watcher files">
+        <tr><th>State</th><td><code>data/gmail_state.txt</code> keeps the last processed message id and cutoff date.</td></tr>
+        <tr><th>Activity</th><td><code>data/gmail_activity.jsonl</code> captures filed, skipped, partial, and failed outcomes.</td></tr>
+        <tr><th>Logs</th><td><code>logs/jarvis.log</code> records watcher activity and filing decisions.</td></tr>
+      </table>
+
+      <div class="callout">
+        If the relevance or filing step fails, Marvis should lean toward not losing a document. The watcher is built around preserving useful mail, not silently discarding it.
+      </div>
+    </section>
+
+    <section class="panel" id="architecture" data-panel>
+      <h2>Memory, Drive, calendar, and task architecture</h2>
+      <div class="flow" style="margin-bottom:12px">
+        <div class="leaf"><strong>Memory</strong><span>SQLite memories table + ChromaDB semantic index</span></div>
+        <div class="leaf"><strong>Tasks</strong><span>SQLite tasks table, created and completed through tools</span></div>
+        <div class="leaf"><strong>Financial records</strong><span>SQLite financial_records table linked to filed Drive docs</span></div>
+      </div>
+
+      <div class="grid">
+        <div class="box">
+          <h3>Memory</h3>
+          <p>Structured facts, preferences, decisions, document references, projects, household items, finances, health notes, and tasks live in SQLite, while ChromaDB provides semantic recall.</p>
+        </div>
+        <div class="box">
+          <h3>Drive</h3>
+          <p>Files land under the configured Google Drive root, with top-level folders and model-driven subfolders. The agent can also search and read Drive files directly.</p>
+        </div>
+        <div class="box">
+          <h3>Calendar</h3>
+          <p>Calendar reads and writes use Google Calendar via the calendar client. Relative dates like today or tomorrow are resolved before calling the API.</p>
+        </div>
+        <div class="box">
+          <h3>Tasks</h3>
+          <p>Tasks stay in SQLite, with explicit create/list/complete tool calls. They are only created when the user asks for a task or reminder.</p>
+        </div>
+      </div>
+
+      <table class="table" aria-label="Architecture files">
+        <tr><th>Agent loop</th><td><code>core/agent.py</code></td></tr>
+        <tr><th>Memory store</th><td><code>memory/manager.py</code></td></tr>
+        <tr><th>Drive schema</th><td><code>storage/schema.py</code>, <code>storage/drive.py</code></td></tr>
+        <tr><th>Calendar</th><td><code>calendar_api/</code></td></tr>
+        <tr><th>Telegram</th><td><code>telegram_bot/bot.py</code></td></tr>
+        <tr><th>Gmail watcher</th><td><code>gmail/watcher.py</code></td></tr>
+      </table>
+    </section>
+
+    <section class="panel" id="routing" data-panel>
+      <h2>OpenRouter model routing at a high level</h2>
+      <div class="flow">
+        <div class="node"><strong>Task comes in</strong><span>chat, filing, relevance, vision, or finance</span></div>
+        <div class="arrow">→</div>
+        <div class="node"><strong>Model selector</strong><span><code>core/llm_client.py</code> picks a task model or the default model</span></div>
+        <div class="arrow">→</div>
+        <div class="node"><strong>OpenRouter</strong><span>Anthropic-style Messages API over OpenRouter auth</span></div>
+        <div class="arrow">→</div>
+        <div class="node"><strong>Result</strong><span>tool call, classification, or user-facing answer</span></div>
+      </div>
+
+      <table class="table" aria-label="Routing table">
+        <tr><th>Default</th><td>General chat and agent reasoning use <code>OPENROUTER_MODEL</code>.</td></tr>
+        <tr><th>Relevance</th><td>Gmail filtering can use <code>OPENROUTER_MODEL_RELEVANCE</code> when set.</td></tr>
+        <tr><th>Financial</th><td>Financial extraction can use <code>OPENROUTER_MODEL_FINANCIAL</code> when set.</td></tr>
+        <tr><th>Classification</th><td>Attachment filing can use <code>OPENROUTER_MODEL_CLASSIFICATION</code> when set.</td></tr>
+        <tr><th>Vision</th><td>Image-heavy paths can use <code>OPENROUTER_MODEL_VISION</code> when set.</td></tr>
+      </table>
+
+      <div class="note">
+        The client clears any ambient <code>ANTHROPIC_API_KEY</code> so OpenRouter is the only auth path used for Anthropic-format calls.
+      </div>
+    </section>
+
+    <div class="note">
+      <strong>Open locally</strong>
+      <div style="margin-top:8px">
+        <div>Best path: run <code>python -m dashboard</code> and open <code>http://127.0.0.1:8080/docs</code>.</div>
+        <div>Standalone path: open <code>docs/index.html</code> directly if you only need the static page.</div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    (() => {
+      const tabs = Array.from(document.querySelectorAll(".tab"));
+      const panels = Array.from(document.querySelectorAll("[data-panel]"));
+
+      function activate(target) {
+        for (const tab of tabs) {
+          tab.classList.toggle("active", tab.dataset.target === target);
+          tab.setAttribute("aria-selected", tab.dataset.target === target ? "true" : "false");
+        }
+        for (const panel of panels) {
+          panel.classList.toggle("active", panel.id === target);
+        }
+        if (history.replaceState) {
+          history.replaceState(null, "", "#" + target);
+        }
+      }
+
+      for (const tab of tabs) {
+        tab.addEventListener("click", () => activate(tab.dataset.target));
+      }
+
+      const hash = window.location.hash.replace(/^#/, "");
+      if (hash && document.getElementById(hash)) {
+        activate(hash);
+      }
+    })();
+  </script>
+</body>
+</html>

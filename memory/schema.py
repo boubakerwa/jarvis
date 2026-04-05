@@ -14,6 +14,7 @@ class MemoryCategory(str, Enum):
     HOUSEHOLD = "household"
     FINANCE = "finance"
     HEALTH = "health"
+    TASK = "task"
 
 
 class MemorySource(str, Enum):

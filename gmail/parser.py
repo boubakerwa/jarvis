@@ -3,9 +3,7 @@ Email and attachment parsing from Gmail API message payloads.
 """
 import base64
 import logging
-import os
 import re
-import tempfile
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -143,35 +141,6 @@ def _get_attachment_data(gmail_service, message_id: str, body: dict) -> Optional
 
 
 def _extract_text(data: bytes, mime_type: str, filename: str) -> str:
-    """Extract text content from attachment bytes based on MIME type."""
-    try:
-        if mime_type == "application/pdf" or filename.lower().endswith(".pdf"):
-            return _extract_pdf_text(data)
-        elif mime_type in (
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        ) or filename.lower().endswith(".docx"):
-            return _extract_docx_text(data)
-        elif mime_type.startswith("text/"):
-            return data.decode("utf-8", errors="replace")
-    except Exception as e:
-        logger.warning("Text extraction failed for %s: %s", filename, e)
-    return ""
-
-
-def _extract_pdf_text(data: bytes) -> str:
-    import PyPDF2
-    import io
-    reader = PyPDF2.PdfReader(io.BytesIO(data))
-    pages = []
-    for page in reader.pages:
-        text = page.extract_text()
-        if text:
-            pages.append(text)
-    return "\n".join(pages)
-
-
-def _extract_docx_text(data: bytes) -> str:
-    import docx
-    import io
-    doc = docx.Document(io.BytesIO(data))
-    return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+    """Extract text content from attachment bytes. Delegates to utils.text_extraction."""
+    from utils.text_extraction import extract_text
+    return extract_text(data, mime_type, filename)
