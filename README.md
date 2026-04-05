@@ -1,264 +1,364 @@
-# Marvis
+<p align="center">
+  <img src="./dashboard/assets/marvis-mark.png" alt="Marvis logo" width="120" />
+</p>
 
-> Marvis (Marvelous Jarvis) is a personal AI assistant running locally on a Mac Mini, accessible via Telegram.
+<h1 align="center">Marvis</h1>
 
-Marvis monitors your Gmail inbox, analyses emails and attachments, organises documents into a structured Google Drive library, and maintains a persistent memory about you. It answers questions about anything you've shared with it through a simple Telegram chat.
+<p align="center">
+  <strong>Marvelous Jarvis</strong> is a local AI assistant that talks over Telegram, watches Gmail, files documents into Google Drive, remembers useful context, and stays inspectable through a local dashboard.
+</p>
 
-Local docs: [docs/index.html](./docs/index.html) or, when the dashboard is running, [http://127.0.0.1:8080/docs](http://127.0.0.1:8080/docs).
+<p align="center">
+  <img src="https://img.shields.io/badge/python-3.12%2B-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.12+" />
+  <img src="https://img.shields.io/badge/runtime-local-1f2937?style=flat-square" alt="Local runtime" />
+  <img src="https://img.shields.io/badge/interface-Telegram-26A5E4?style=flat-square&logo=telegram&logoColor=white" alt="Telegram interface" />
+  <img src="https://img.shields.io/badge/email-Gmail-EA4335?style=flat-square&logo=gmail&logoColor=white" alt="Gmail watcher" />
+  <img src="https://img.shields.io/badge/storage-Google%20Drive-0F9D58?style=flat-square&logo=googledrive&logoColor=white" alt="Google Drive storage" />
+  <img src="https://img.shields.io/badge/model-Claude%20style%20tools-CB785C?style=flat-square" alt="Claude-style tool loop" />
+  <img src="https://img.shields.io/badge/routing-OpenRouter-111827?style=flat-square" alt="OpenRouter routing" />
+</p>
 
----
+<p align="center">
+  <a href="./docs/index.html"><strong>Docs</strong></a>
+  |
+  <a href="./docs/medium-marvis-article.md"><strong>Medium Article Draft</strong></a>
+  |
+  <a href="http://127.0.0.1:8080/docs"><strong>Local Docs Route</strong></a>
+</p>
+
+> Marvis is designed as a real operator-facing personal assistant, not a toy chatbot. It keeps the agent loop close to Anthropic's Messages model, adds deterministic guardrails around dates and structured outputs, and exposes memory, Drive state, and activity through a local dashboard.
+
+## Why Marvis
+
+Most personal assistants look good in chat and fall apart when they touch real systems.
+
+Marvis is built around a different idea:
+
+- keep the model loop simple and Claude-shaped
+- let the application own storage, time, validation, and side effects
+- expose memory and recent actions so the system stays inspectable
+- treat Gmail filing, calendar writes, and document handling like product workflows, not prompt stunts
+
+That gives you an assistant that can actually do useful local work:
+
+| Surface | What Marvis does |
+|---|---|
+| Telegram chat | answers questions, recalls memory, searches Drive context, creates tasks, checks calendar |
+| Gmail watcher | scans unread mail after a cutoff date, filters low-value mail, files useful attachments |
+| Google Drive filing | classifies uploads and attachments into a fixed folder structure with predictable names |
+| Memory | stores durable facts, preferences, decisions, and document references in SQLite plus ChromaDB |
+| Dashboard | shows overview, memory, Drive files, activity, and interactive docs |
+| Docs | ships with local architecture docs plus a Medium-ready article draft |
+
+## Architecture
+
+Marvis has one long-lived chat agent and several specialized LLM-driven stages for background workflows.
+
+```mermaid
+flowchart LR
+  subgraph User["User Surfaces"]
+    TG["Telegram chat"]
+    UP["Telegram uploads"]
+    DB["Local dashboard"]
+  end
+
+  subgraph Core["Marvis Core"]
+    AG["Chat Agent"]
+    MEM["Memory Manager<br/>SQLite + ChromaDB"]
+    TOOLS["Local tools and managers"]
+    ROUTER["OpenRouter<br/>Anthropic-style Messages API"]
+  end
+
+  subgraph Pipeline["Background Pipelines"]
+    GW["Gmail watcher"]
+    PARSE["Parser + extraction"]
+    REL["Relevance Agent"]
+    CLS["Classification Agent"]
+    FIN["Financial Agent"]
+  end
+
+  subgraph Google["Google Services"]
+    DRIVE["Google Drive"]
+    CAL["Google Calendar"]
+  end
+
+  TG --> AG
+  AG --> ROUTER
+  ROUTER --> AG
+  AG --> TOOLS
+  TOOLS --> MEM
+  TOOLS --> DRIVE
+  TOOLS --> CAL
+  MEM --> AG
+
+  UP --> PARSE
+  GW --> PARSE
+  PARSE --> REL
+  REL --> CLS
+  CLS --> DRIVE
+  CLS --> MEM
+  PARSE --> FIN
+  FIN --> MEM
+
+  DB --> MEM
+  DB --> DRIVE
+```
+
+Interactive architecture docs live in [docs/index.html](./docs/index.html) and on the dashboard route [http://127.0.0.1:8080/docs](http://127.0.0.1:8080/docs).
+
+### Runtime Roles
+
+- **Chat Agent** (`core/agent.py`) handles the Anthropic-format tool loop and assembles final replies.
+- **Relevance Agent** (`gmail/relevance.py`) decides whether a Gmail message is worth filing.
+- **Classification Agent** (`agent_sdk/filer.py`) picks the Drive path, filename, and summary for attachments and uploads.
+- **Vision Agent** (`utils/text_extraction.py`) describes image-heavy documents when plain extraction is not enough.
+- **Financial Agent** (`utils/financial_extraction.py`) extracts vendor, amount, category, and date for finance-oriented documents.
+
+## What Makes It Reliable
+
+The model is allowed to reason. The app is responsible for reality.
+
+Marvis hardens the risky parts of agent behavior with deterministic code:
+
+- relative dates like `today`, `tomorrow`, and `Monday` are resolved locally before calendar or task actions run
+- structured outputs are parsed and validated before they can mutate storage
+- Gmail backfills are bounded by a configured cutoff date
+- document filing prefers preserving useful documents over silently dropping them
+- memory is externalized into structured records instead of hidden in conversation state
+
+This turned out to matter more than prompt polish. The biggest failures in agent systems are usually plausible outputs that are just wrong enough to cause trouble.
 
 ## Features
 
 | Capability | Details |
 |---|---|
-| **Conversational AI** | Hand-rolled Anthropic-format agent loop routed through OpenRouter |
-| **Persistent Memory** | SQLite (structured) + ChromaDB (semantic search) — remembers facts, preferences, decisions, documents |
-| **Gmail Monitoring** | Polls inbox every 5 min, parses emails + attachments (PDF, DOCX, images) |
-| **Email Relevance Filter** | OpenRouter-backed Claude evaluates each email and skips newsletters, OTPs, and notifications — only real documents get filed |
-| **Smart Document Filing** | OpenRouter-backed Claude classifies each attachment and files it to the right Google Drive folder automatically |
-| **Telegram Interface** | Secure single-user bot with commands for memory management |
+| Claude-style agent loop | Hand-rolled `system + messages + tools` loop with `tool_use` / `tool_result` round trips |
+| OpenRouter routing | Anthropic-compatible transport with Claude as the safe default and optional task-level overrides |
+| Persistent memory | SQLite for source of truth plus ChromaDB for semantic retrieval |
+| Gmail monitoring | Polls unread mail every 5 minutes and starts only after the configured cutoff date |
+| Smart filing | Classifies documents and uploads them into a structured Google Drive library |
+| Financial extraction | Pulls vendor, amount, date, and category from finance-oriented documents |
+| Telegram bot | Single-user bot with slash commands, uploads, and long-polling deployment |
+| Dashboard | Overview, memory browser, Drive mirror, activity log, and interactive docs |
+| Article-ready docs | Includes a Medium draft that explains the architecture and tradeoffs |
 
----
+## Quick Start
 
-## Architecture
-
-Interactive architecture docs: [docs/index.html](./docs/index.html) or [http://127.0.0.1:8080/docs](http://127.0.0.1:8080/docs).
-
-```
-Telegram chat
-  -> Chat Agent (JarvisAgent)
-  -> local tools and managers
-  -> SQLite + ChromaDB / Google Drive / Google Calendar
-  -> Telegram reply
-
-Telegram upload or Gmail filing
-  -> parser and extraction
-  -> Relevance Agent (Gmail only)
-  -> Classification Agent
-  -> Google Drive + local memory
-  -> optional Financial Agent
-  -> filing confirmation or watcher activity update
-```
-
-Runtime note: only `JarvisAgent` is a long-lived runtime object. The Relevance, Classification, Vision, and Financial agents are specialized LLM-driven stages documented as agents to make the hand-offs easier to follow.
-
-- **Chat Agent** (`core/agent.py`) — runs the Anthropic-format tool loop over OpenRouter and assembles the final reply
-- **Relevance Agent** (`gmail/relevance.py`) — decides whether a Gmail message is worth filing before the document pipeline continues
-- **Classification Agent** (`agent_sdk/filer.py`) — chooses the Drive path, filename, and summary for uploads and email attachments
-- **Vision Agent** (`utils/text_extraction.py`) — describes image-heavy documents when plain extraction is not enough
-- **Financial Agent** (`utils/financial_extraction.py`) — extracts vendor, amount, category, and date for finance-oriented documents
-
----
-
-## Memory System
-
-Each memory is a structured record:
-
-| Field | Description |
-|---|---|
-| `topic` | Dedup key — one record per topic |
-| `summary` | 1–2 sentence description |
-| `category` | `preference` · `fact` · `decision` · `document_ref` · `project` · `household` · `finance` · `health` |
-| `source` | `telegram` · `email` · `document` · `manual` |
-| `confidence` | `high` · `medium` · `low` |
-| `document_ref` | Google Drive file ID (for filed documents) |
-| `supersedes` | UUID of replaced record (audit trail) |
-
-Before each model call, the top-N most semantically relevant memories are retrieved from ChromaDB and injected into the system prompt.
-
----
-
-## Google Drive Structure
-
-All files are organised under the existing Google Drive root folder (currently `Jarvis/`) with fixed top-level folders:
-
-```
-Jarvis/
-├── Finances/          (Banking, Investments, Tax)
-├── Insurance/         (Health, Liability, Vehicle)
-├── Legal & Contracts/ (Employment, Rental, Service Agreements)
-├── Travel/            (Bookings, Visas & Docs)
-├── Health/            (Records, Prescriptions)
-├── Subscriptions/
-├── Real Estate/
-├── Vehicles/
-├── Projects & Side Hustles/ (Sufra, Other)
-├── Personal Development/    (Courses & Certificates, Books & Resources)
-├── Household/         (Appliances & Warranties, Repairs & Services, Utilities)
-└── Misc/
-```
-
-Files are named `YYYY-MM_description.ext` for chronological sorting.
-
----
-
-## Email Relevance Filtering
-
-Not every email triggers a filing action. Before any attachment is processed, the model evaluates the email and decides whether it's worth storing.
-
-**Filed:**
-- Contracts, agreements, legal documents
-- Invoices, receipts, payment confirmations
-- Insurance documents or policies
-- Travel bookings, tickets, itineraries
-- Official correspondence (government, tax, bank, employer)
-- Health records, prescriptions, medical documents
-- Certificates, credentials, licences
-
-**Skipped:**
-- Newsletters and marketing emails
-- OTPs, verification codes, security alerts
-- Social notifications (likes, follows, comments)
-- Automated system notifications and status updates
-
-If the relevance check fails for any reason, Marvis defaults to **filing the email** rather than silently losing a document.
-
----
-
-## Telegram Commands
-
-| Command | Description |
-|---|---|
-| Any message | Passed to the agent — ask anything |
-| `/memories` | List all stored memories grouped by category |
-| `/forget <topic>` | Delete a memory by topic |
-| `/reset` | Clear in-session conversation history (long-term memories are preserved) |
-| `/status` | Show memory count, Drive status, model info |
-| File / photo upload | Classified by the configured model and filed to Drive automatically |
-
----
-
-## Setup
-
-### 1. Clone & install
+### 1. Clone and install
 
 ```bash
 git clone https://github.com/boubakerwa/jarvis.git
 cd jarvis
 python3.12 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 ```
 
-Marvis now targets Python 3.12. If you are upgrading an existing checkout, recreate the virtual environment before reinstalling dependencies.
+Marvis now targets Python 3.12. If you are upgrading an older checkout, recreate the virtual environment first.
 
-### 2. Configure environment
+### 2. Configure `.env`
 
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env` with your credentials:
+Fill in the main settings:
 
 ```env
 OPENROUTER_API_KEY=sk-or-...
-TELEGRAM_BOT_TOKEN=...          # from @BotFather
-TELEGRAM_ALLOWED_USER_ID=...    # your numeric Telegram user ID
-GOOGLE_CREDENTIALS_PATH=.credentials.json
-GOOGLE_TOKEN_PATH=token.json
 OPENROUTER_BASE_URL=https://openrouter.ai/api
 OPENROUTER_MODEL=anthropic/claude-sonnet-4.6
+
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_ALLOWED_USER_ID=...
+
+GOOGLE_CREDENTIALS_PATH=.credentials.json
+GOOGLE_TOKEN_PATH=token.json
+
 JARVIS_TIMEZONE=Europe/Berlin
+
 # Optional lower-risk Gemma routing:
 # OPENROUTER_MODEL_RELEVANCE=google/gemma-4-31b-it
 # OPENROUTER_MODEL_FINANCIAL=google/gemma-4-31b-it
 ```
 
-### 3. Google OAuth
+### 3. Set up Google OAuth
 
-1. Go to [Google Cloud Console](https://console.cloud.google.com/)
-2. Create a project, enable **Gmail API** and **Google Drive API**
-3. Create OAuth 2.0 credentials (Desktop app), download as `.credentials.json`
-4. On first run, a browser window opens for consent — `token.json` is created automatically
+1. Open [Google Cloud Console](https://console.cloud.google.com/).
+2. Create a project and enable **Gmail API**, **Google Drive API**, and **Google Calendar API**.
+3. Create OAuth 2.0 desktop credentials and save them as `.credentials.json`.
+4. On first run, complete the consent flow in your browser. Marvis will create `token.json` automatically.
 
-### 4. Run
+### 4. Run the app
 
 ```bash
 python main.py
 ```
 
----
-
-## Project Structure
-
-```
-jarvis/
-├── main.py                   # Entry point
-├── requirements.txt
-├── .env.example
-├── config/
-│   └── settings.py           # Environment variable loading
-├── core/
-│   ├── agent.py              # Main agent loop + tool execution
-│   ├── llm_client.py         # Shared OpenRouter-backed Anthropic client
-│   └── prompts.py            # System prompt builder + memory injection
-├── memory/
-│   ├── schema.py             # MemoryRecord dataclass
-│   └── manager.py            # SQLite + ChromaDB CRUD
-├── storage/
-│   ├── schema.py             # Drive folder constants + classification prompt
-│   └── drive.py              # Google Drive API client
-├── agent_sdk/
-│   └── filer.py              # OpenRouter-backed attachment classifier
-├── gmail/
-│   ├── parser.py             # Email + attachment parsing
-│   ├── relevance.py          # OpenRouter-backed email relevance filter
-│   └── watcher.py            # Gmail polling loop
-└── telegram_bot/
-    └── bot.py                # Telegram bot handler
-```
-
----
-
-## Deployment (Mac Mini)
-
-Run Marvis as a persistent background service with `launchd`:
+### 5. Run the dashboard
 
 ```bash
-# Coming in Phase 6 — launchd plist for auto-start on login
+python -m dashboard
 ```
 
-Logs are written to `logs/jarvis.log` and `logs/jarvis_error.log`.
+Open [http://127.0.0.1:8080](http://127.0.0.1:8080).
 
-Telegram uses **long-polling** — no public IP or inbound port required. Works behind NAT out of the box.
+## Telegram Commands
 
----
-
-## Build Phases
-
-| Phase | Status |
+| Command | Description |
 |---|---|
-| 1 — Foundation (project structure, memory, agent loop, Drive schema) | ✅ Done |
-| 2 — Google Drive (OAuth, folder init, file upload) | ✅ Done |
-| 3 — Telegram Bot (polling, commands, file upload handler) | ✅ Done |
-| 4 — Gmail Watcher (polling loop, email parsing, attachments) | ✅ Done |
-| 5 — Attachment Pipeline (classify → Drive → memory) | ✅ Done |
-| 6 — Integration & Polish (launchd, end-to-end testing, logging) | 🔜 Next |
-| 7 — UI (web dashboard — future) | 🔮 Planned |
+| Any message | Goes through the chat agent |
+| `/status` | Shows memory count, Drive status, and configured model |
+| `/memories` | Lists stored memories grouped by category |
+| `/forget <topic>` | Deletes a memory by topic |
+| `/reset` | Clears in-session chat history while preserving long-term memory |
+| File or photo upload | Runs the classification and filing pipeline |
 
----
+## Memory Model
 
-## Stack
+Each memory is stored as a structured record:
 
-| Component | Technology |
+| Field | Description |
 |---|---|
-| Language | Python 3.12+ |
-| AI | OpenRouter, defaulting to Anthropic Claude (`anthropic/claude-sonnet-4.6`) |
-| Memory (structured) | SQLite |
-| Memory (semantic) | ChromaDB |
-| Messaging | python-telegram-bot |
-| Email | Gmail API |
-| Storage | Google Drive API |
-| Auth | Google OAuth 2.0 |
+| `topic` | Deduplication key |
+| `summary` | Short description of the fact or decision |
+| `category` | `preference`, `fact`, `decision`, `document_ref`, `project`, `household`, `finance`, or `health` |
+| `source` | `telegram`, `email`, `document`, or `manual` |
+| `confidence` | `high`, `medium`, or `low` |
+| `document_ref` | Google Drive file ID for filed documents |
+| `supersedes` | UUID of the record it replaced |
+
+Before each model call, the top relevant memories are retrieved from ChromaDB and injected into the system prompt.
+
+## Drive Filing Layout
+
+Files are organized under the existing Drive root folder `Jarvis/` for backward compatibility.
+
+<details>
+<summary><strong>Current folder structure</strong></summary>
+
+```text
+Jarvis/
+|- Finances/          (Banking, Investments, Tax)
+|- Insurance/         (Health, Liability, Vehicle)
+|- Legal & Contracts/ (Employment, Rental, Service Agreements)
+|- Travel/            (Bookings, Visas & Docs)
+|- Health/            (Records, Prescriptions)
+|- Subscriptions/
+|- Real Estate/
+|- Vehicles/
+|- Projects & Side Hustles/ (Sufra, Other)
+|- Personal Development/    (Courses & Certificates, Books & Resources)
+|- Household/         (Appliances & Warranties, Repairs & Services, Utilities)
+`- Misc/
+```
+
+</details>
+
+Files are named `YYYY-MM_description.ext` for chronological sorting.
+
+## Dashboard and Docs
+
+The local dashboard gives Marvis an operator surface instead of a black box:
+
+- **Overview** for system status and recent activity
+- **Memory** to inspect what Marvis currently retains about you
+- **Drive** to mirror the Google Drive files Marvis can see
+- **Docs** for architecture walkthroughs and setup help
+
+It also ships with:
+
+- [docs/index.html](./docs/index.html): interactive architecture and operations docs
+- [docs/medium-marvis-article.md](./docs/medium-marvis-article.md): a Medium-ready article draft about Marvis
 
 ## Provider Notes
 
-- Validated on April 5, 2026: Claude via OpenRouter is compatible with Marvis's current Anthropic-style tool loop.
-- Gemma 4 also produced valid tool calls through OpenRouter in a live smoke test, but it showed slower latency and JSON/schema drift, so it is not documented as drop-in production support yet.
-- Recommended selective rollout: keep chat, document classification, and vision on Claude; use Gemma first for `OPENROUTER_MODEL_RELEVANCE` and optionally `OPENROUTER_MODEL_FINANCIAL`.
-- Marvis now validates prompt-based JSON after parsing and supports task-specific model overrides with fallback to the default model on critical structured-output paths.
+- As of April 5, 2026, Claude via OpenRouter is validated for Marvis's Anthropic-style tool loop.
+- Gemma 4 also worked in live smoke tests, but showed slower latency and more JSON/schema drift.
+- Recommended rollout: keep chat, document classification, and vision on Claude first.
+- If you want to experiment, route Gemma only into lower-risk paths like relevance or financial extraction.
+
+## Project Layout
+
+<details>
+<summary><strong>Repository map</strong></summary>
+
+```text
+jarvis/
+|- main.py
+|- requirements.txt
+|- .env.example
+|- config/
+|  `- settings.py
+|- core/
+|  |- agent.py
+|  |- llm_client.py
+|  |- prompts.py
+|  |- structured_output.py
+|  `- time_utils.py
+|- calendar_api/
+|  `- client.py
+|- memory/
+|  |- manager.py
+|  `- schema.py
+|- gmail/
+|  |- parser.py
+|  |- relevance.py
+|  `- watcher.py
+|- storage/
+|  |- drive.py
+|  `- schema.py
+|- agent_sdk/
+|  `- filer.py
+|- utils/
+|  |- financial_extraction.py
+|  `- text_extraction.py
+|- telegram_bot/
+|  `- bot.py
+|- dashboard/
+|  |- app.py
+|  `- assets/
+|- docs/
+|  |- index.html
+|  `- medium-marvis-article.md
+`- tests/
+```
+
+</details>
+
+## Validation
+
+The branch includes automated coverage for:
+
+- OpenRouter client wiring
+- Anthropic-format tool loop behavior
+- structured output validation
+- date resolution and calendar safety
+- Gmail watcher cutoff behavior
+- dashboard rendering and client-side interactions
+- Telegram command publishing
+
+Run the suite with:
+
+```bash
+python -m unittest discover -s tests
+```
+
+## Current Status
+
+| Area | Status |
+|---|---|
+| Chat agent and tools | Done |
+| Gmail watcher and filing pipeline | Done |
+| Memory system | Done |
+| Dashboard and docs | Done |
+| Python 3.12 project setup | Done |
+| Launchd packaging | Not yet shipped |
+| PR polish and broader production hardening | In progress |
 
 ---
 
-*Built by Wess — personal use only.*
+<p align="center">
+  Built by Wess for personal use. Marvis keeps the assistant local, useful, and inspectable.
+</p>
