@@ -548,64 +548,226 @@
     </section>
 
     <section class="panel" id="architecture" data-panel>
-      <h2>Memory, Drive, calendar, and task architecture</h2>
-      <div class="flow" style="margin-bottom:12px">
-        <div class="leaf"><strong>Memory</strong><span>SQLite memories table + ChromaDB semantic index</span></div>
-        <div class="leaf"><strong>Tasks</strong><span>SQLite tasks table, created and completed through tools</span></div>
-        <div class="leaf"><strong>Financial records</strong><span>SQLite financial_records table linked to filed Drive docs</span></div>
+      <h2>Interactive architecture flow</h2>
+      <p class="architecture-intro">Switch scenarios to trace how information moves across inputs, agents, tools and APIs, storage layers, and user-facing outputs. The same shared map powers chat, uploads, Gmail filing, document Q&amp;A, and calendar or task requests.</p>
+
+      <div class="note">
+        <strong>Accuracy note</strong>
+        <p style="margin-top:8px">Only <code>JarvisAgent</code> is a long-lived runtime object. The Relevance, Classification, Vision, and Financial agents are specialized LLM-driven stages in the pipeline, documented here as agents so the hand-offs are easier to follow at a glance.</p>
       </div>
 
-      <div class="grid">
-        <div class="box">
-          <h3>Memory</h3>
-          <p>Structured facts, preferences, decisions, document references, projects, household items, finances, health notes, and tasks live in SQLite, while ChromaDB provides semantic recall.</p>
+      <div class="architecture-shell" data-architecture>
+        <div class="scenario-tabs" role="tablist" aria-label="Architecture scenarios">
+          <button class="scenario-tab active" type="button" data-scenario="telegram-chat">Telegram chat</button>
+          <button class="scenario-tab" type="button" data-scenario="telegram-upload">Telegram upload</button>
+          <button class="scenario-tab" type="button" data-scenario="gmail-filing">Gmail filing</button>
+          <button class="scenario-tab" type="button" data-scenario="drive-qa">Drive Q&amp;A</button>
+          <button class="scenario-tab" type="button" data-scenario="calendar-tasks">Calendar &amp; tasks</button>
         </div>
-        <div class="box">
-          <h3>Drive</h3>
-          <p>Files land under the configured Google Drive root, with top-level folders and model-driven subfolders. The agent can also search and read Drive files directly.</p>
+        <div class="architecture-caption">Default scenario: Telegram chat. Hover any highlighted node to inspect it, and on narrow screens scroll sideways to keep the five-lane map intact.</div>
+
+        <div class="architecture-scroll">
+          <div class="architecture-map" data-architecture-map>
+            <svg class="arch-edge-layer" data-architecture-edges aria-hidden="true"></svg>
+
+            <div class="architecture-lane">
+              <div class="lane-label">Inputs</div>
+              <div class="lane-stack">
+                <button class="arch-node" type="button" data-node="input-telegram-chat">
+                  <span class="node-kicker">Input</span>
+                  <strong>Telegram chat</strong>
+                  <span>Plain text, commands, and document questions arriving through <code>telegram_bot/bot.py</code>.</span>
+                </button>
+                <button class="arch-node" type="button" data-node="input-telegram-upload">
+                  <span class="node-kicker">Input</span>
+                  <strong>Telegram upload</strong>
+                  <span>Files and photos enter the filing path before a confirmation goes back to the user.</span>
+                </button>
+                <button class="arch-node" type="button" data-node="input-gmail-watcher">
+                  <span class="node-kicker">Input</span>
+                  <strong>Gmail watcher</strong>
+                  <span>Unread mail is polled in the background by <code>gmail/watcher.py</code>.</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="architecture-lane">
+              <div class="lane-label">Agents</div>
+              <div class="lane-stack">
+                <button class="arch-node" type="button" data-node="agent-chat">
+                  <span class="node-kicker">Agent</span>
+                  <strong>Chat Agent</strong>
+                  <span><code>JarvisAgent</code> runs the Anthropic-style tool loop and assembles the final reply.</span>
+                </button>
+                <button class="arch-node" type="button" data-node="agent-relevance">
+                  <span class="node-kicker">Agent</span>
+                  <strong>Relevance Agent</strong>
+                  <span>Scores incoming mail and decides whether the filing pipeline should continue.</span>
+                </button>
+                <button class="arch-node" type="button" data-node="agent-classification">
+                  <span class="node-kicker">Agent</span>
+                  <strong>Classification Agent</strong>
+                  <span>Chooses the Drive path, normalized filename, and short summary for each document.</span>
+                </button>
+                <button class="arch-node" type="button" data-node="agent-vision">
+                  <span class="node-kicker">Agent</span>
+                  <strong>Vision Agent</strong>
+                  <span>Describes image-heavy documents when standard text extraction is not enough.</span>
+                </button>
+                <button class="arch-node" type="button" data-node="agent-financial">
+                  <span class="node-kicker">Agent</span>
+                  <strong>Financial Agent</strong>
+                  <span>Extracts vendor, amount, category, and date from finance-oriented documents.</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="architecture-lane">
+              <div class="lane-label">Tools / APIs</div>
+              <div class="lane-stack">
+                <button class="arch-node" type="button" data-node="tool-openrouter">
+                  <span class="node-kicker">Runtime</span>
+                  <strong>OpenRouter routing</strong>
+                  <span><code>core/llm_client.py</code> keeps Anthropic-shaped requests while selecting task-specific models.</span>
+                </button>
+                <button class="arch-node" type="button" data-node="tool-parser">
+                  <span class="node-kicker">Tooling</span>
+                  <strong>Parser &amp; extraction</strong>
+                  <span><code>gmail/parser.py</code> and <code>utils/text_extraction.py</code> turn mail and files into usable text.</span>
+                </button>
+                <button class="arch-node" type="button" data-node="tool-agent-tools">
+                  <span class="node-kicker">Tooling</span>
+                  <strong>Agent tools</strong>
+                  <span>Memory, Drive search and read, calendar, and task tools executed from <code>core/agent.py</code>.</span>
+                </button>
+                <button class="arch-node" type="button" data-node="tool-google-clients">
+                  <span class="node-kicker">API layer</span>
+                  <strong>Google clients</strong>
+                  <span>Drive, Calendar, and Gmail client adapters handle upload, query, and OAuth-backed API calls.</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="architecture-lane">
+              <div class="lane-label">Storage</div>
+              <div class="lane-stack">
+                <button class="arch-node" type="button" data-node="storage-memory">
+                  <span class="node-kicker">Storage</span>
+                  <strong>SQLite + ChromaDB</strong>
+                  <span>Memories, tasks, financial records, and semantic recall stay local under <code>memory/manager.py</code>.</span>
+                </button>
+                <button class="arch-node" type="button" data-node="storage-drive">
+                  <span class="node-kicker">Storage</span>
+                  <strong>Google Drive library</strong>
+                  <span>Filed documents land under the managed Jarvis root with model-selected folders and filenames.</span>
+                </button>
+                <button class="arch-node" type="button" data-node="storage-calendar">
+                  <span class="node-kicker">Storage</span>
+                  <strong>Calendar state</strong>
+                  <span>Google Calendar events are queried or created after relative dates are resolved locally.</span>
+                </button>
+                <button class="arch-node" type="button" data-node="storage-activity">
+                  <span class="node-kicker">Storage</span>
+                  <strong>Watcher activity</strong>
+                  <span><code>data/gmail_state.txt</code> and <code>data/gmail_activity.jsonl</code> capture progress and outcomes.</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="architecture-lane">
+              <div class="lane-label">Outputs</div>
+              <div class="lane-stack">
+                <button class="arch-node" type="button" data-node="output-telegram-reply">
+                  <span class="node-kicker">Output</span>
+                  <strong>Telegram reply</strong>
+                  <span>Answers, resolved dates, Drive summaries, and task updates go back to the chat.</span>
+                </button>
+                <button class="arch-node" type="button" data-node="output-confirmation">
+                  <span class="node-kicker">Output</span>
+                  <strong>Filing confirmation</strong>
+                  <span>The user sees where a Telegram upload was stored and the generated summary.</span>
+                </button>
+                <button class="arch-node" type="button" data-node="output-watcher">
+                  <span class="node-kicker">Output</span>
+                  <strong>Watcher update</strong>
+                  <span>Gmail activity is recorded as filed, skipped, partial, or failed for later inspection.</span>
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
-        <div class="box">
-          <h3>Calendar</h3>
-          <p>Calendar reads and writes use Google Calendar via the calendar client. Relative dates like today or tomorrow are resolved before calling the API.</p>
-        </div>
-        <div class="box">
-          <h3>Tasks</h3>
-          <p>Tasks stay in SQLite, with explicit create/list/complete tool calls. They are only created when the user asks for a task or reminder.</p>
+
+        <div class="architecture-meta">
+          <div class="box">
+            <h3 id="architecture-story-title">Telegram chat</h3>
+            <p class="story-summary" id="architecture-story-summary"></p>
+            <ol class="story-steps" id="architecture-story-steps"></ol>
+            <div class="story-note" id="architecture-story-note"></div>
+          </div>
+          <div class="box">
+            <h3>Source trail</h3>
+            <p class="story-summary">These are the primary files touched by the currently selected scenario.</p>
+            <div class="source-grid" id="architecture-sources"></div>
+          </div>
         </div>
       </div>
-
-      <table class="table" aria-label="Architecture files">
-        <tr><th>Agent loop</th><td><code>core/agent.py</code></td></tr>
-        <tr><th>Memory store</th><td><code>memory/manager.py</code></td></tr>
-        <tr><th>Drive schema</th><td><code>storage/schema.py</code>, <code>storage/drive.py</code></td></tr>
-        <tr><th>Calendar</th><td><code>calendar_api/</code></td></tr>
-        <tr><th>Telegram</th><td><code>telegram_bot/bot.py</code></td></tr>
-        <tr><th>Gmail watcher</th><td><code>gmail/watcher.py</code></td></tr>
-      </table>
     </section>
 
     <section class="panel" id="routing" data-panel>
-      <h2>OpenRouter model routing at a high level</h2>
-      <div class="flow">
-        <div class="node"><strong>Task comes in</strong><span>chat, filing, relevance, vision, or finance</span></div>
-        <div class="arrow">→</div>
-        <div class="node"><strong>Model selector</strong><span><code>core/llm_client.py</code> picks a task model or the default model</span></div>
-        <div class="arrow">→</div>
-        <div class="node"><strong>OpenRouter</strong><span>Anthropic-style Messages API over OpenRouter auth</span></div>
-        <div class="arrow">→</div>
-        <div class="node"><strong>Result</strong><span>tool call, classification, or user-facing answer</span></div>
-      </div>
-
-      <table class="table" aria-label="Routing table">
-        <tr><th>Default</th><td>General chat and agent reasoning use <code>OPENROUTER_MODEL</code>.</td></tr>
-        <tr><th>Relevance</th><td>Gmail filtering can use <code>OPENROUTER_MODEL_RELEVANCE</code> when set.</td></tr>
-        <tr><th>Financial</th><td>Financial extraction can use <code>OPENROUTER_MODEL_FINANCIAL</code> when set.</td></tr>
-        <tr><th>Classification</th><td>Attachment filing can use <code>OPENROUTER_MODEL_CLASSIFICATION</code> when set.</td></tr>
-        <tr><th>Vision</th><td>Image-heavy paths can use <code>OPENROUTER_MODEL_VISION</code> when set.</td></tr>
-      </table>
+      <h2>Model routing companion</h2>
+      <p class="architecture-intro">This is the shared model layer underneath the architecture map. Every agent or specialist stage uses the same Anthropic-shaped client, then selects a task-specific override when one is configured.</p>
 
       <div class="note">
-        The client clears any ambient <code>ANTHROPIC_API_KEY</code> so OpenRouter is the only auth path used for Anthropic-format calls.
+        <strong>Route spine</strong>
+        <div class="route-flow">
+          <div class="leaf"><strong>Agent or stage</strong><span>Chat, relevance, classification, vision, or financial extraction initiates a request.</span></div>
+          <div class="leaf"><strong>Model selector</strong><span><code>core/llm_client.py</code> resolves a task-specific model or the default model.</span></div>
+          <div class="leaf"><strong>OpenRouter client</strong><span>Anthropic SDK calls OpenRouter with Anthropic-style messages and tool definitions.</span></div>
+          <div class="leaf"><strong>Validated result</strong><span>The result becomes text, structured JSON, extracted document text, or a tool-aware answer.</span></div>
+        </div>
+      </div>
+
+      <div class="route-grid">
+        <div class="route-card">
+          <div class="route-tag">Chat Agent</div>
+          <h3>Default conversation routing</h3>
+          <p>General reasoning and tool use go through <code>OPENROUTER_MODEL</code> inside the long-lived chat loop.</p>
+          <code>core/agent.py</code>
+        </div>
+        <div class="route-card">
+          <div class="route-tag">Relevance Agent</div>
+          <h3>Mail triage routing</h3>
+          <p><code>OPENROUTER_MODEL_RELEVANCE</code> can specialize the Gmail filing decision. If validation fails, the system files the email rather than risking data loss.</p>
+          <code>gmail/relevance.py</code>
+        </div>
+        <div class="route-card">
+          <div class="route-tag">Classification Agent</div>
+          <h3>Document filing routing</h3>
+          <p><code>OPENROUTER_MODEL_CLASSIFICATION</code> chooses the folder, filename, and summary, with fallback to the default model when the structured output drifts.</p>
+          <code>agent_sdk/filer.py</code>
+        </div>
+        <div class="route-card">
+          <div class="route-tag">Vision Agent</div>
+          <h3>Image description routing</h3>
+          <p><code>OPENROUTER_MODEL_VISION</code> is used for image-heavy documents and screenshots when OCR-style extraction needs multimodal help.</p>
+          <code>utils/text_extraction.py</code>
+        </div>
+        <div class="route-card">
+          <div class="route-tag">Financial Agent</div>
+          <h3>Financial extraction routing</h3>
+          <p><code>OPENROUTER_MODEL_FINANCIAL</code> can specialize receipt and invoice parsing, with strict JSON validation before records are stored.</p>
+          <code>utils/financial_extraction.py</code>
+        </div>
+        <div class="route-card">
+          <div class="route-tag">Shared guardrails</div>
+          <h3>Structured validation and auth</h3>
+          <p><code>core/structured_output.py</code> validates structured responses, while the client clears ambient <code>ANTHROPIC_API_KEY</code> so OpenRouter stays the only auth path.</p>
+          <code>core/structured_output.py</code>
+        </div>
+      </div>
+
+      <div class="callout">
+        Structured-output paths are where most of the routing discipline lives. Relevance and financial extraction fail safely, while classification can retry through the default model when a task-specific route returns invalid JSON.
       </div>
     </section>
 
