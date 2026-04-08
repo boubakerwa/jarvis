@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -44,6 +45,17 @@ class FakeMessage:
 class FakeUpdate:
     def __init__(self):
         self.message = FakeMessage()
+
+
+class FakeProactiveBot:
+    def __init__(self, should_fail: bool = False):
+        self.should_fail = should_fail
+        self.calls = []
+
+    async def send_message(self, chat_id, text):
+        self.calls.append((chat_id, text))
+        if self.should_fail:
+            raise RuntimeError("network error")
 
 
 class TelegramBotTests(unittest.TestCase):
@@ -127,6 +139,52 @@ class TelegramBotTests(unittest.TestCase):
         self.assertIn("Estimated cost: $0.006000 (1/2 priced)", text)
         self.assertIn("*Top tasks*", text)
         self.assertIn("- chat: 1 calls, 1200 tokens, 800.0 ms avg", text)
+
+    def test_proactive_notifier_sends_message(self):
+        module = load_module("tested_telegram_bot_proactive", "telegram_bot/bot.py")
+        fake_bot = FakeProactiveBot()
+        notifier = module.TelegramProactiveNotifier(
+            enabled=True,
+            chat_id=12345,
+            bot=fake_bot,
+            max_message_length=8,
+        )
+
+        with patch.object(module, "record_activity"), patch.object(module, "record_issue"):
+            sent = notifier.send_message("Email filed successfully")
+
+        self.assertTrue(sent)
+        self.assertEqual(
+            fake_bot.calls,
+            [
+                (12345, "Email fi"),
+                (12345, "led succ"),
+                (12345, "essfully"),
+            ],
+        )
+
+    def test_proactive_notifier_honors_disabled_flag(self):
+        module = load_module("tested_telegram_bot_proactive_disabled", "telegram_bot/bot.py")
+        fake_bot = FakeProactiveBot()
+        notifier = module.TelegramProactiveNotifier(enabled=False, chat_id=12345, bot=fake_bot)
+
+        with patch.object(module, "record_activity"), patch.object(module, "record_issue"):
+            sent = notifier.send_message("This should not send")
+
+        self.assertFalse(sent)
+        self.assertEqual(fake_bot.calls, [])
+
+    def test_proactive_notifier_returns_false_on_error(self):
+        module = load_module("tested_telegram_bot_proactive_error", "telegram_bot/bot.py")
+        fake_bot = FakeProactiveBot(should_fail=True)
+        notifier = module.TelegramProactiveNotifier(enabled=True, chat_id=12345, bot=fake_bot)
+
+        with patch.object(module, "record_activity"), patch.object(module, "record_issue") as issue_mock, patch.object(module.logger, "exception"):
+            sent = notifier.send_message("Attempt")
+
+        self.assertFalse(sent)
+        self.assertEqual(fake_bot.calls, [(12345, "Attempt")])
+        issue_mock.assert_called_once()
 
 
 if __name__ == "__main__":

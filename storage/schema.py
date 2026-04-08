@@ -17,6 +17,7 @@ DRIVE_STRUCTURE: dict[str, list[str]] = {
     "Real Estate": [],
     "Vehicles": [],
     "Projects & Side Hustles": ["Sufra", "Other"],
+    "PR": ["LinkedIn Composer"],
     "Personal Development": ["Courses & Certificates", "Books & Resources"],
     "Household": ["Appliances & Warranties", "Repairs & Services", "Utilities"],
     "Misc": [],

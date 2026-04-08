@@ -4,13 +4,15 @@ from __future__ import annotations
 Telegram bot handler. Routes messages to the Marvis agent loop.
 Only processes messages from TELEGRAM_ALLOWED_USER_ID.
 """
+import asyncio
 import json
 import logging
+import re
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any
 
-from telegram import BotCommand, BotCommandScopeChat, Document, PhotoSize, Update
+from telegram import Bot, BotCommand, BotCommandScopeChat, Document, PhotoSize, Update
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -37,8 +39,54 @@ from core.opslog import (
 logger = logging.getLogger(__name__)
 
 
+class TelegramProactiveNotifier:
+    """Send proactive one-off messages outside the regular chat handler loop."""
+
+    def __init__(
+        self,
+        *,
+        enabled: bool = True,
+        bot_token: str | None = None,
+        chat_id: int | None = None,
+        bot: Bot | None = None,
+        max_message_length: int = 4096,
+    ):
+        self._enabled = enabled
+        self._chat_id = chat_id or settings.TELEGRAM_ALLOWED_USER_ID
+        self._bot = bot or Bot(token=bot_token or settings.TELEGRAM_BOT_TOKEN)
+        self._max_message_length = max(1, max_message_length)
+
+    def send_message(self, text: str) -> bool:
+        message = text.strip()
+        if not self._enabled or not message:
+            return False
+
+        try:
+            chunks = _split_message(message, self._max_message_length)
+            for chunk in chunks:
+                asyncio.run(self._bot.send_message(chat_id=self._chat_id, text=chunk))
+            record_activity(
+                event="telegram_proactive_message_sent",
+                component="telegram",
+                summary="Sent proactive Telegram message",
+                metadata={"message_length": len(message), "chunk_count": len(chunks)},
+            )
+            return True
+        except Exception as exc:
+            logger.exception("Failed to send proactive Telegram message")
+            record_issue(
+                level="ERROR",
+                event="telegram_proactive_message_failed",
+                component="telegram",
+                status="error",
+                summary="Failed to send proactive Telegram message",
+                metadata={"error": str(exc)},
+            )
+            return False
+
+
 class TelegramBot:
-    def __init__(self, agent, memory_manager, drive_client=None, calendar_client=None, notes_manager=None):
+    def __init__(self, agent, memory_manager, drive_client=None, calendar_client=None, notes_manager=None, linkedin_drive=None):
         self._agent = agent
         self._memory = memory_manager
         self._drive = drive_client
@@ -69,6 +117,7 @@ class TelegramBot:
         self._app.add_handler(CommandHandler("reset", self._cmd_reset, filters=allow))
         self._app.add_handler(CommandHandler("status", self._cmd_status, filters=allow))
         self._app.add_handler(CommandHandler("llmops", self._cmd_llmops, filters=allow))
+        self._app.add_handler(CommandHandler("linkedin", self._cmd_linkedin, filters=allow))
 
         # File/photo uploads
         self._app.add_handler(
@@ -90,6 +139,7 @@ class TelegramBot:
             BotCommand("memories", "List stored memories"),
             BotCommand("forget", "Delete a memory by topic"),
             BotCommand("reset", "Clear chat history"),
+            BotCommand("linkedin", "Draft a LinkedIn post from text or URL"),
         ]
 
     async def _publish_bot_commands(self, application: Application) -> None:
@@ -164,12 +214,24 @@ class TelegramBot:
         calendar_status = "connected" if self._calendar else "not initialised"
         notes_status = "connected" if self._notes else "not initialised"
 
+        # LinkedIn queue depth
+        try:
+            from linkedin.sqlite_store import count_by_status
+            li_counts = count_by_status()
+            li_pending = li_counts.get("pending_generation", 0)
+            li_ready = li_counts.get("ready", 0)
+            li_failed = li_counts.get("failed", 0)
+            li_str = f"{li_pending} pending · {li_ready} ready · {li_failed} failed"
+        except Exception:
+            li_str = "unavailable"
+
         lines = [
-            f"*Marvis Status*",
+            "*Marvis Status*",
             f"Memories: {memory_count}",
             f"Drive: {drive_status}",
             f"Calendar: {calendar_status}",
             f"Notes: {notes_status}",
+            f"LinkedIn queue: {li_str}",
             f"Model: {settings.OPENROUTER_MODEL}",
         ]
         await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
@@ -205,6 +267,242 @@ class TelegramBot:
                 )
 
         await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+    async def _cmd_linkedin(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """
+        /linkedin <text>              — queue a draft (confirmed immediately)
+        /linkedin voice=X <text>      — set voice: professional|operator|founder
+        /linkedin author=@handle <text>
+        /linkedin rewrite <id> [preset or instructions]
+        /linkedin list [all|pending|ready|failed]
+        /linkedin process             — trigger immediate processing run
+        /linkedin help
+
+        Nothing from this command is stored in the memory system — ever.
+        """
+        args_text = " ".join(context.args) if context.args else ""
+
+        if not args_text or args_text.strip().lower() == "help":
+            help_text = (
+                "*LinkedIn Composer*\n\n"
+                "Queue a draft \\(processed within 15 min\\):\n"
+                "  `/linkedin <text>`\n\n"
+                "Set voice:\n"
+                "  `/linkedin voice=operator <text>`\n"
+                "  Voices: professional \\(default\\), operator, founder\n\n"
+                "Attribute a source:\n"
+                "  `/linkedin author=@handle <text>`\n\n"
+                "Rewrite a ready draft:\n"
+                "  `/linkedin rewrite <draft\\_id> <preset or instructions>`\n"
+                "  Presets: builder\\-voice, stronger\\-hook, shorter\\-post, operator\\-lesson, more\\-opinionated\n\n"
+                "List drafts:\n"
+                "  `/linkedin list` — all recent\n"
+                "  `/linkedin list pending` — queued only\n"
+                "  `/linkedin list ready` — ready only\n\n"
+                "Force-process now:\n"
+                "  `/linkedin process`\n\n"
+                "_Drafts live in Drive: Jarvis/PR/LinkedIn Composer/_"
+            )
+            await update.message.reply_text(help_text, parse_mode="MarkdownV2")
+            return
+
+        if args_text.strip().lower() == "process":
+            await self._linkedin_process_now(update)
+            return
+
+        first_word = args_text.strip().split()[0].lower()
+        if first_word == "list":
+            parts = args_text.strip().split(None, 1)
+            status_filter = parts[1].strip().lower() if len(parts) > 1 else None
+            valid_filters = {"pending", "ready", "failed", "pending_generation", "all", None}
+            if status_filter not in valid_filters:
+                status_filter = None
+            if status_filter == "pending":
+                status_filter = "pending_generation"
+            if status_filter == "all":
+                status_filter = None
+            await self._linkedin_list(update, status_filter=status_filter)
+            return
+
+        if first_word == "rewrite":
+            remainder = args_text.strip()[len("rewrite"):].strip()
+            parts = remainder.split(None, 1)
+            draft_id_prefix = parts[0] if parts else ""
+            instructions = parts[1] if len(parts) > 1 else ""
+            await self._linkedin_rewrite(update, draft_id_prefix, instructions)
+            return
+
+        # --- Queue a new draft ---
+        voice = "professional"
+        author = ""
+        remaining = args_text
+
+        voice_match = re.search(r"\bvoice=(professional|operator|founder)\b", remaining, re.IGNORECASE)
+        if voice_match:
+            voice = voice_match.group(1).lower()
+            remaining = remaining.replace(voice_match.group(0), "").strip()
+
+        author_match = re.search(r"\bauthor=(\S+)", remaining, re.IGNORECASE)
+        if author_match:
+            author = author_match.group(1)
+            remaining = remaining.replace(author_match.group(0), "").strip()
+
+        source_text = remaining.strip()
+        if not source_text:
+            await update.message.reply_text("Please provide source text after /linkedin")
+            return
+
+        op_id = new_op_id("linkedin-queue")
+        with operation_context(op_id):
+            record_activity(
+                event="linkedin_draft_queued",
+                component="linkedin",
+                summary="LinkedIn draft queued via Telegram",
+            )
+            try:
+                from linkedin.composer import build_enqueue_payload, format_queued_for_telegram
+                from linkedin.sqlite_store import enqueue
+
+                payload = build_enqueue_payload(
+                    text=source_text,
+                    author=author,
+                    voice=voice,
+                    origin="telegram",
+                )
+                row = enqueue(payload)
+                reply = format_queued_for_telegram(row)
+
+                for chunk in _split_message(reply, 4096):
+                    await update.message.reply_text(chunk, parse_mode="Markdown")
+
+                record_audit(
+                    event="linkedin_draft_queued",
+                    component="linkedin",
+                    summary="Queued LinkedIn draft to SQLite",
+                    metadata={"draft_id": row.get("id", "")[:8], "voice": voice},
+                )
+            except Exception as exc:
+                logger.exception("LinkedIn queue failed")
+                record_issue(
+                    level="ERROR",
+                    event="linkedin_queue_failed",
+                    component="linkedin",
+                    status="error",
+                    summary="Failed to queue LinkedIn draft",
+                    metadata={"error": str(exc)},
+                )
+                await update.message.reply_text(f"Failed to queue draft: {exc}")
+
+    async def _linkedin_list(self, update: Update, status_filter: str | None = None) -> None:
+        try:
+            from linkedin.sqlite_store import list_drafts
+            drafts = list_drafts(limit=12, status_filter=status_filter)
+            if not drafts:
+                label = f" with status '{status_filter}'" if status_filter else ""
+                await update.message.reply_text(f"No LinkedIn drafts{label} found.")
+                return
+
+            filter_label = f" · {status_filter}" if status_filter else ""
+            lines = [f"*LinkedIn Drafts*{filter_label}\n"]
+            for d in drafts:
+                draft_id = d.get("id", "")[:8]
+                status = d.get("status", "")
+                status_icon = {"ready": "✅", "pending_generation": "⏳", "failed": "❌"}.get(status, "•")
+                obsidian_note = d.get("obsidian_filename", "") or "_(pending)_"
+                created = d.get("created_at", "")[:10]
+                voice = d.get("voice", "")
+                pillar = d.get("pillar_label", "")
+                attempts = d.get("attempts", 0)
+                attempt_str = f" · {attempts} attempt(s)" if attempts else ""
+                lines.append(
+                    f"{status_icon} `{draft_id}` — {obsidian_note}\n"
+                    f"  {created} · {voice} · {pillar}{attempt_str}"
+                )
+            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        except Exception as exc:
+            logger.exception("LinkedIn list failed")
+            await update.message.reply_text(f"Failed to list drafts: {exc}")
+
+    async def _linkedin_rewrite(self, update: Update, draft_id_prefix: str, instructions: str) -> None:
+        if not draft_id_prefix:
+            await update.message.reply_text("Usage: `/linkedin rewrite <draft_id> <instructions>`", parse_mode="Markdown")
+            return
+
+        try:
+            from linkedin.sqlite_store import get_by_id_prefix, enqueue
+            from linkedin.composer import build_enqueue_payload, format_queued_for_telegram, REWRITE_PRESETS
+
+            existing = get_by_id_prefix(draft_id_prefix)
+            if not existing:
+                await update.message.reply_text(
+                    f"Draft `{draft_id_prefix}` not found. Use `/linkedin list` to see recent drafts.",
+                    parse_mode="Markdown",
+                )
+                return
+
+            if existing.get("status") != "ready":
+                await update.message.reply_text(
+                    f"Draft `{draft_id_prefix}` is not ready yet (status: `{existing.get('status')}`).",
+                    parse_mode="Markdown",
+                )
+                return
+
+            # Resolve preset
+            preset_id = ""
+            preset_ids = {p["id"] for p in REWRITE_PRESETS}
+            if instructions.strip().lower() in preset_ids:
+                preset_id = instructions.strip().lower()
+                instructions = ""
+
+            if not instructions and not preset_id:
+                preset_list = ", ".join(p["id"] for p in REWRITE_PRESETS)
+                await update.message.reply_text(
+                    f"Provide rewrite instructions or a preset ID.\nPresets: {preset_list}",
+                )
+                return
+
+            payload = build_enqueue_payload(
+                text=existing.get("source_text", ""),
+                author=existing.get("source_author", ""),
+                source_url=existing.get("source_url", ""),
+                voice=existing.get("voice", "professional"),
+                origin="telegram",
+                rewrite_of=existing.get("id", ""),
+                rewrite_instructions=instructions,
+                preset_id=preset_id,
+            )
+            row = enqueue(payload)
+            reply = format_queued_for_telegram(row)
+            for chunk in _split_message(reply, 4096):
+                await update.message.reply_text(chunk, parse_mode="Markdown")
+
+        except Exception as exc:
+            logger.exception("LinkedIn rewrite queue failed")
+            await update.message.reply_text(f"Failed to queue rewrite: {exc}")
+
+    async def _linkedin_process_now(self, update: Update) -> None:
+        """Trigger an immediate processing run."""
+        from linkedin.sqlite_store import list_pending
+        pending_count = len(list_pending())
+        if pending_count == 0:
+            await update.message.reply_text("No pending LinkedIn drafts in queue.")
+            return
+        await update.message.reply_text(f"⚙️ Processing {pending_count} pending draft(s)…")
+        try:
+            from linkedin.processor import process_pending_drafts
+            summary = process_pending_drafts(self._notes, notifier=None)
+            lines = [
+                f"✅ Processed: {summary['processed']}",
+                f"❌ Failed: {summary['failed']}",
+                f"⏭ Skipped: {summary['skipped']}",
+            ]
+            if summary.get("errors"):
+                lines.append("\nErrors:")
+                lines += [f"  • {e}" for e in summary["errors"][:5]]
+            await update.message.reply_text("\n".join(lines))
+        except Exception as exc:
+            logger.exception("LinkedIn manual process failed")
+            await update.message.reply_text(f"Processor error: {exc}")
 
     # ------------------------------------------------------------------
     # Message handlers
