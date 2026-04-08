@@ -5,7 +5,7 @@ from typing import Optional
 
 from config import settings
 from core.llmops import record_llm_call
-from core.llm_client import create_llm_client, get_model_name
+from core.llm_client import call_with_free_model_retry, create_llm_client, get_model_name
 from core.prompts import build_system_prompt
 from core.time_utils import (
     contains_explicit_date,
@@ -392,12 +392,15 @@ class JarvisAgent:
             started_at = datetime.now(timezone.utc).isoformat()
             started_clock = monotonic()
             try:
-                response = self._client.messages.create(
-                    model=model_name,
-                    max_tokens=settings.MAX_TOKENS,
-                    system=system_prompt,
-                    tools=TOOLS,
-                    messages=messages,
+                response = call_with_free_model_retry(
+                    lambda: self._client.messages.create(
+                        model=model_name,
+                        max_tokens=settings.MAX_TOKENS,
+                        system=system_prompt,
+                        tools=TOOLS,
+                        messages=messages,
+                    ),
+                    model_name,
                 )
             except Exception as exc:
                 record_llm_call(

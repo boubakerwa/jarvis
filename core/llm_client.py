@@ -4,7 +4,9 @@ Routes Anthropic Messages API calls through OpenRouter while keeping the
 existing message/tool format intact.
 """
 import os
-from typing import Optional
+import random
+import time
+from typing import Any, Callable, Optional
 
 import anthropic
 
@@ -41,3 +43,28 @@ def get_model_candidates(task: Optional[str] = None, *, allow_fallback: bool = T
     if allow_fallback and primary != settings.OPENROUTER_MODEL:
         models.append(settings.OPENROUTER_MODEL)
     return models
+
+
+_FREE_RETRY_DELAYS = [5, 10, 20]  # seconds between retries for :free models
+
+
+def call_with_free_model_retry(fn: Callable[[], Any], model: str) -> Any:
+    """Call fn(). For :free models, retry up to 3 times on 429 with exponential backoff.
+    For all other models, passes through immediately with no retry logic."""
+    import anthropic as _anthropic
+
+    if ":free" not in model:
+        return fn()
+
+    last_exc: Exception | None = None
+    for delay in [0] + _FREE_RETRY_DELAYS:
+        if delay > 0:
+            time.sleep(delay + random.uniform(0, delay * 0.2))
+        try:
+            return fn()
+        except _anthropic.RateLimitError as exc:
+            last_exc = exc
+        except Exception:
+            raise  # non-429 errors propagate immediately
+
+    raise last_exc

@@ -43,7 +43,7 @@ class DriveClient:
             with open(token_path, "w") as f:
                 f.write(creds.to_json())
 
-        return build("drive", "v3", credentials=creds)
+        return build("drive", "v3", credentials=creds, cache_discovery=False)
 
     # ------------------------------------------------------------------
     # Folder management

@@ -40,7 +40,7 @@ class CalendarClient:
             with open(token_path, "w") as f:
                 f.write(creds.to_json())
 
-        return build("calendar", "v3", credentials=creds)
+        return build("calendar", "v3", credentials=creds, cache_discovery=False)
 
     def get_events(
         self,

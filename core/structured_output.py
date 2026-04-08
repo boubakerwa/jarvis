@@ -10,7 +10,7 @@ from time import monotonic
 from typing import Any, Callable, Optional
 
 from core.llmops import record_llm_call
-from core.llm_client import create_llm_client, get_model_candidates
+from core.llm_client import call_with_free_model_retry, create_llm_client, get_model_candidates
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +81,7 @@ def generate_validated_json(
         started_at = datetime.now(timezone.utc).isoformat()
         started_clock = monotonic()
         try:
-            response = client.messages.create(**request)
+            response = call_with_free_model_retry(lambda: client.messages.create(**request), model)
         except Exception as exc:
             record_llm_call(
                 task=task,
