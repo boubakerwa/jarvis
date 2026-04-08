@@ -23,6 +23,20 @@ class FakeNotes:
     def append_note(self, path, content):
         return {"path": path}
 
+    def update_note(
+        self,
+        path,
+        *,
+        content=None,
+        find_text=None,
+        replace_with=None,
+        replace_all=False,
+        preserve_frontmatter=True,
+    ):
+        if content is not None:
+            return {"path": path, "mode": "replace_content"}
+        return {"path": path, "mode": "replace_text", "replacement_count": 1}
+
     def search_notes(self, query, folder=None, limit=5):
         return [
             {
@@ -85,6 +99,21 @@ class AgentNotesTests(unittest.TestCase):
 
         self.assertIn("Marvis/Ideas/local-first.md", response)
         self.assertIn("Recent update", response)
+
+    def test_update_note_returns_replacement_summary(self):
+        agent = self.module.JarvisAgent.__new__(self.module.JarvisAgent)
+        agent._notes = FakeNotes()
+
+        response = agent._tool_update_note(
+            {
+                "path": "Marvis/Ideas/gift-ideas-for-anna.md",
+                "find_text": "Espresso machine",
+                "replace_with": "Leather weekender bag",
+            }
+        )
+
+        self.assertIn("Note updated", response)
+        self.assertIn("1 replacement", response)
 
 
 if __name__ == "__main__":

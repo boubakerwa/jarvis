@@ -91,6 +91,12 @@ class DashboardSnapshot:
     ops_recent_issues: list["OpsEventItem"]
     ops_recent_audit: list["OpsEventItem"]
     ops_heartbeat_points: list["HeartbeatPoint"]
+    linkedin_drafts: list["LinkedInDraftItem"] = None  # type: ignore[assignment]
+    linkedin_draft_count: str = "—"
+
+    def __post_init__(self) -> None:
+        if self.linkedin_drafts is None:
+            self.linkedin_drafts = []
 
 
 @dataclass
@@ -113,6 +119,28 @@ class MemoryItem:
     created_at: str
     updated_at: str
     document_ref: str
+
+
+@dataclass
+class LinkedInDraftItem:
+    draft_id: str
+    headline: str
+    hook: str
+    full_post: str
+    voice: str
+    pillar_label: str
+    tags: list[str]
+    revision_number: int
+    parent_draft_id: str
+    source_label: str
+    source_type: str
+    generation_mode: str
+    created_at: str
+    updated_at: str
+    status: str
+    obsidian_path: str
+    obsidian_filename: str
+    attempts: int
 
 
 @dataclass
@@ -872,7 +900,59 @@ def _load_drive_snapshot() -> tuple[list[DriveFileItem], str, str]:
         return payload
 
 
-def collect_snapshot(include_memories: bool = False, include_drive: bool = False) -> DashboardSnapshot:
+def _load_linkedin_drafts_from_sqlite(limit: int = 20) -> tuple[list[LinkedInDraftItem], str]:
+    """Load LinkedIn drafts from SQLite for the dashboard."""
+    try:
+        import sqlite3 as _sqlite3
+        from config import settings as _settings
+        conn = _sqlite3.connect(_settings.JARVIS_DB_PATH, check_same_thread=False)
+        conn.row_factory = _sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM linkedin_drafts ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        conn.close()
+    except Exception as exc:
+        logger.warning("Dashboard LinkedIn SQLite load failed: %s", exc)
+        return [], f"unavailable: {exc}"
+
+    items: list[LinkedInDraftItem] = []
+    for row in rows:
+        r = dict(row)
+        try:
+            tags = json.loads(r.get("library_tags") or "[]")
+        except Exception:
+            tags = []
+        items.append(
+            LinkedInDraftItem(
+                draft_id=str(r.get("id", ""))[:8],
+                headline=str(r.get("obsidian_filename", "") or r.get("id", "")[:8]),
+                hook="",
+                full_post="",
+                voice=str(r.get("voice", "")),
+                pillar_label=str(r.get("pillar_label", "")),
+                tags=tags,
+                revision_number=1,
+                parent_draft_id=str(r.get("rewrite_of", ""))[:8],
+                source_label=str(r.get("source_author", "") or r.get("source_url", "")),
+                source_type=str(r.get("source_type", "")),
+                generation_mode="llm",
+                created_at=str(r.get("created_at", ""))[:19].replace("T", " "),
+                updated_at=str(r.get("updated_at", ""))[:19].replace("T", " "),
+                status=str(r.get("status", "")),
+                obsidian_path=str(r.get("obsidian_path", "")),
+                obsidian_filename=str(r.get("obsidian_filename", "")),
+                attempts=int(r.get("attempts", 0)),
+            )
+        )
+    return items, f"loaded {len(items)} draft(s)"
+
+
+def collect_snapshot(
+    include_memories: bool = False,
+    include_drive: bool = False,
+    include_linkedin: bool = False,
+) -> DashboardSnapshot:
     log_lines = _read_lines(LOG_PATH, limit=500)
     log_text = "\n".join(log_lines)
     recent_email_activity, processed_summary = _gmail_activity()
@@ -891,6 +971,12 @@ def collect_snapshot(include_memories: bool = False, include_drive: bool = False
         drive_files, drive_status, drive_detail = _load_drive_snapshot()
     else:
         drive_files, drive_status, drive_detail = [], "idle", "not loaded in this view"
+
+    linkedin_drafts: list[LinkedInDraftItem] = []
+    linkedin_draft_count = "—"
+    if include_linkedin:
+        linkedin_drafts, _ = _load_linkedin_drafts_from_sqlite()
+        linkedin_draft_count = str(len(linkedin_drafts))
 
     app_status = "running" if ops_summary.heartbeat_status == "running" else _app_status_from_logs(log_lines)
     recent_log_lines = ops_recent_lines or log_lines[-40:]
@@ -919,6 +1005,8 @@ def collect_snapshot(include_memories: bool = False, include_drive: bool = False
         ops_recent_issues=ops_recent_issues,
         ops_recent_audit=ops_recent_audit,
         ops_heartbeat_points=ops_heartbeat_points,
+        linkedin_drafts=linkedin_drafts,
+        linkedin_draft_count=linkedin_draft_count,
     )
 
 
@@ -943,7 +1031,7 @@ def _load_dashboard_logo_svg() -> str:
 
 
 def _normalize_tab(tab: str) -> str:
-    if tab in {"overview", "memory", "drive", "llmops"}:
+    if tab in {"overview", "memory", "drive", "llmops", "linkedin"}:
         return tab
     return "overview"
 
@@ -954,6 +1042,7 @@ def _tab_nav(active_tab: str) -> str:
         ("memory", "Memory"),
         ("drive", "Drive"),
         ("llmops", "LLMOps"),
+        ("linkedin", "LinkedIn"),
     ]
     return "\n".join(
         f'<button type="button" data-tab="{html.escape(key)}" class="tab {"active" if key == active_tab else ""}">{html.escape(label)}</button>'
@@ -1649,8 +1738,296 @@ def _render_summary_panel(snapshot: DashboardSnapshot) -> str:
           <tr><th>Email outcomes</th><td class="muted">Processed {sum(summary.values())} | Skipped {summary.get('skipped', 0)} | Filed {summary.get('filed', 0)} | Failed {summary.get('failed', 0)}</td></tr>
           <tr><th>LLM activity</th><td class="muted">Calls {llmops.call_count} | Tokens {llmops.total_tokens} | Success {_format_success_rate(llmops.success_count, llmops.call_count)} | Est. cost {html.escape(_format_llm_cost(llmops.estimated_cost_usd))}</td></tr>
           <tr><th>Ops logging</th><td class="muted">Heartbeat {html.escape(ops.heartbeat_status)} | Issues {ops.issue_count} | Audit {ops.audit_count} | Activity retention {_format_retention_window(ACTIVITY_RETENTION_SECONDS)}</td></tr>
+          <tr><th>LinkedIn drafts</th><td class="muted">{html.escape(snapshot.linkedin_draft_count)} in queue</td></tr>
         </table>
       </section>
+    """
+
+
+def _render_linkedin_content(snapshot: DashboardSnapshot) -> str:
+    drafts = snapshot.linkedin_drafts
+
+    if not drafts:
+        empty_html = """
+        <div class="li-empty">
+          <span class="li-tag">LINKEDIN COMPOSER</span>
+          <p class="li-empty-text">No drafts yet.<br>
+          Send <code>/linkedin &lt;text or URL&gt;</code> from Telegram to create your first draft.</p>
+        </div>"""
+    else:
+        STATUS_ICON = {"ready": "✅", "pending_generation": "⏳", "failed": "❌"}
+        cards_html = ""
+        for item in drafts:
+            tags_html = " ".join(
+                f'<span class="li-inline-tag">{html.escape(t.upper())}</span>'
+                for t in item.tags
+            )
+            parent_html = (
+                f'<span class="li-inline-tag">REWRITE OF {html.escape(item.parent_draft_id)}</span>'
+                if item.parent_draft_id else ""
+            )
+            status_icon = STATUS_ICON.get(item.status, "·")
+            status_label = item.status.replace("_", " ").upper()
+            obsidian_html = (
+                f'<span class="li-meta-item">OBSIDIAN <span class="li-meta-value" title="{html.escape(item.obsidian_path)}">'
+                f'{html.escape(item.obsidian_filename or "—")}</span></span>'
+            )
+            attempts_html = (
+                f'<span class="li-inline-tag li-inline-tag--warn">ATTEMPTS {item.attempts}</span>'
+                if item.attempts > 1 else ""
+            )
+            cards_html += f"""
+            <div class="li-card li-card--{html.escape(item.status)}">
+              <div class="li-card-header">
+                <div class="li-card-meta">
+                  <span class="li-tag">{html.escape(item.pillar_label.upper() or "LINKEDIN")}</span>
+                  {parent_html}
+                  {attempts_html}
+                </div>
+                <div class="li-card-status">{status_icon} <span class="li-status-label">{status_label}</span></div>
+              </div>
+              <h3 class="li-headline">{html.escape(item.headline)}</h3>
+              <div class="li-meta-row">
+                <span class="li-meta-item">VOICE <span class="li-meta-value">{html.escape(item.voice.upper())}</span></span>
+                <span class="li-meta-sep">·</span>
+                <span class="li-meta-item">SOURCE <span class="li-meta-value">{html.escape(item.source_type.upper())}</span></span>
+                <span class="li-meta-sep">·</span>
+                {obsidian_html}
+                <span class="li-meta-sep">·</span>
+                <span class="li-meta-item li-meta-ts">{html.escape(item.created_at)}</span>
+              </div>
+              {f'<div class="li-source-label">Source: {html.escape(item.source_label)}</div>' if item.source_label else ""}
+              <div class="li-tags-row">{tags_html}</div>
+            </div>"""
+        empty_html = f'<div class="li-grid">{cards_html}</div>'
+
+    return f"""
+    <style>
+      /* ── SolidTelco-derived LinkedIn section styles ───────────────────── */
+      @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;510;590&display=swap');
+      .li-root {{
+        font-family: 'Inter', -apple-system, system-ui, Segoe UI, Roboto, sans-serif;
+        font-feature-settings: "cv01", "ss03";
+        background: #0d0f12;
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 4px;
+        padding: 32px;
+      }}
+      .li-section-header {{
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 28px;
+        padding-bottom: 16px;
+        border-bottom: 1px solid rgba(255,255,255,0.06);
+      }}
+      .li-section-title {{
+        font-size: 20px;
+        font-weight: 510;
+        color: #f0f1f3;
+        letter-spacing: -0.24px;
+        margin: 0;
+      }}
+      .li-count {{
+        font-family: ui-monospace, SFMono-Regular, Roboto Mono, Menlo, Monaco, Courier New, monospace;
+        font-size: 12px;
+        font-weight: 400;
+        letter-spacing: 0.8px;
+        text-transform: uppercase;
+        color: #7a808c;
+      }}
+      .li-tag {{
+        display: inline-block;
+        font-family: ui-monospace, SFMono-Regular, Roboto Mono, Menlo, Monaco, Courier New, monospace;
+        font-size: 10px;
+        font-weight: 400;
+        letter-spacing: 1.2px;
+        text-transform: uppercase;
+        color: #00c8ff;
+        background: rgba(0,200,255,0.08);
+        border: 1px solid rgba(0,200,255,0.25);
+        padding: 3px 8px;
+        border-radius: 0;
+      }}
+      .li-inline-tag {{
+        display: inline-block;
+        font-family: ui-monospace, SFMono-Regular, Roboto Mono, Menlo, Monaco, Courier New, monospace;
+        font-size: 10px;
+        font-weight: 400;
+        letter-spacing: 0.8px;
+        text-transform: uppercase;
+        color: #b8bdc6;
+        background: rgba(255,255,255,0.06);
+        border: 1px solid rgba(255,255,255,0.12);
+        padding: 2px 6px;
+        border-radius: 2px;
+        margin-right: 4px;
+      }}
+      .li-inline-tag--accent {{
+        color: #00c8ff;
+        background: rgba(0,200,255,0.08);
+        border-color: rgba(0,200,255,0.25);
+      }}
+      .li-grid {{
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 16px;
+      }}
+      @media (min-width: 1100px) {{
+        .li-grid {{ grid-template-columns: repeat(2, 1fr); }}
+      }}
+      .li-card {{
+        background: #1c1f24;
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 4px;
+        padding: 24px;
+        transition: border-color 0.15s;
+      }}
+      .li-card:hover {{
+        border-color: rgba(255,255,255,0.16);
+      }}
+      .li-card-header {{
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        margin-bottom: 14px;
+        gap: 12px;
+      }}
+      .li-card-meta {{
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        align-items: center;
+      }}
+      .li-card-actions {{ flex-shrink: 0; }}
+      .li-drive-link {{
+        font-family: ui-monospace, SFMono-Regular, Roboto Mono, Menlo, Monaco, Courier New, monospace;
+        font-size: 10px;
+        font-weight: 400;
+        letter-spacing: 1.4px;
+        text-transform: uppercase;
+        color: #00c8ff;
+        text-decoration: none;
+        border: 1px solid rgba(0,200,255,0.35);
+        padding: 4px 10px;
+        transition: background 0.15s;
+      }}
+      .li-drive-link:hover {{
+        background: rgba(0,200,255,0.08);
+        text-decoration: none;
+      }}
+      .li-headline {{
+        font-size: 16px;
+        font-weight: 510;
+        color: #f0f1f3;
+        letter-spacing: -0.1px;
+        margin: 0 0 12px 0;
+        line-height: 1.4;
+      }}
+      .li-meta-row {{
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px;
+        margin-bottom: 12px;
+      }}
+      .li-meta-item {{
+        font-family: ui-monospace, SFMono-Regular, Roboto Mono, Menlo, Monaco, Courier New, monospace;
+        font-size: 10px;
+        font-weight: 400;
+        letter-spacing: 0.8px;
+        text-transform: uppercase;
+        color: #7a808c;
+      }}
+      .li-meta-value {{
+        color: #b8bdc6;
+      }}
+      .li-meta-sep {{ color: rgba(255,255,255,0.18); }}
+      .li-meta-ts {{ text-transform: none; letter-spacing: 0; }}
+      .li-source-label {{
+        font-size: 12px;
+        color: #7a808c;
+        margin-bottom: 10px;
+        font-style: italic;
+      }}
+      .li-hook {{
+        font-size: 14px;
+        font-weight: 400;
+        color: #b8bdc6;
+        line-height: 1.6;
+        margin-bottom: 14px;
+        border-left: 2px solid rgba(0,200,255,0.35);
+        padding-left: 12px;
+      }}
+      .li-details {{
+        margin-bottom: 12px;
+      }}
+      .li-details-summary {{
+        font-family: ui-monospace, SFMono-Regular, Roboto Mono, Menlo, Monaco, Courier New, monospace;
+        font-size: 10px;
+        font-weight: 400;
+        letter-spacing: 1.2px;
+        text-transform: uppercase;
+        color: #7a808c;
+        cursor: pointer;
+        user-select: none;
+        outline: none;
+      }}
+      .li-details-summary:hover {{ color: #b8bdc6; }}
+      .li-full-post {{
+        margin: 10px 0 0 0;
+        padding: 14px;
+        background: #141619;
+        border: 1px solid rgba(255,255,255,0.06);
+        border-radius: 2px;
+        font-size: 13px;
+        color: #b8bdc6;
+        line-height: 1.7;
+        white-space: pre-wrap;
+        word-break: break-word;
+        font-family: inherit;
+      }}
+      .li-tags-row {{
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        margin-top: 4px;
+      }}
+      .li-warning {{
+        margin-top: 10px;
+        font-size: 12px;
+        color: #f59e0b;
+        background: rgba(245,158,11,0.08);
+        border: 1px solid rgba(245,158,11,0.25);
+        padding: 6px 10px;
+        border-radius: 2px;
+      }}
+      .li-empty {{
+        text-align: center;
+        padding: 64px 32px;
+      }}
+      .li-empty-text {{
+        color: #7a808c;
+        font-size: 14px;
+        line-height: 1.7;
+        margin-top: 16px;
+      }}
+      .li-empty code {{
+        font-family: ui-monospace, SFMono-Regular, Roboto Mono, Menlo, Monaco, Courier New, monospace;
+        font-size: 13px;
+        color: #00c8ff;
+        background: rgba(0,200,255,0.08);
+        padding: 2px 6px;
+        border-radius: 2px;
+      }}
+    </style>
+    <section class="panel li-root">
+      <div class="li-section-header">
+        <h2 class="li-section-title">LinkedIn Composer</h2>
+        <span class="li-count">{len(drafts)} DRAFT{'S' if len(drafts) != 1 else ''} · JARVIS/PR/LINKEDIN COMPOSER</span>
+      </div>
+      {empty_html}
+    </section>
     """
 
 
@@ -1662,6 +2039,8 @@ def _render_tab_content(snapshot: DashboardSnapshot, tab: str) -> str:
         return _render_drive_content(snapshot)
     if active_tab == "llmops":
         return _render_llmops_content(snapshot)
+    if active_tab == "linkedin":
+        return _render_linkedin_content(snapshot)
     return _render_overview_content(snapshot)
 
 
@@ -1981,7 +2360,7 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
   </div>
   <script>
     (() => {{
-      const allowedTabs = new Set(["overview", "memory", "drive", "llmops"]);
+      const allowedTabs = new Set(["overview", "memory", "drive", "llmops", "linkedin"]);
       const navButtons = Array.from(document.querySelectorAll(".tab"));
       const summaryPanel = document.getElementById("summary-panel");
       const tabContent = document.getElementById("tab-content");
@@ -2020,8 +2399,8 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
       }}
 
       function currentTabRefreshDelay(tab) {{
-        if (tab === "drive") {{
-          return 45000;
+        if (tab === "drive" || tab === "linkedin") {{
+          return 60000;
         }}
         if (tab === "llmops") {{
           return 20000;
@@ -2210,6 +2589,7 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
       prefetchTab("memory", 500);
       prefetchTab("drive", 1500);
       prefetchTab("llmops", 2200);
+      prefetchTab("linkedin", 3000);
     }})();
   </script>
 </body>
@@ -2238,6 +2618,7 @@ def _snapshot_for_tab(tab: str) -> DashboardSnapshot:
     return collect_snapshot(
         include_memories=active_tab == "memory",
         include_drive=active_tab == "drive",
+        include_linkedin=active_tab == "linkedin",
     )
 
 
@@ -2281,7 +2662,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             _write_response(self, body, "text/html; charset=utf-8")
             return
 
-        if parsed.path in {"/fragment/overview", "/fragment/memory", "/fragment/drive", "/fragment/llmops"}:
+        if parsed.path in {"/fragment/overview", "/fragment/memory", "/fragment/drive", "/fragment/llmops", "/fragment/linkedin"}:
             fragment_tab = parsed.path.rsplit("/", 1)[-1]
             snapshot = _snapshot_for_tab(fragment_tab)
             body = _render_tab_content(snapshot, fragment_tab).encode("utf-8")

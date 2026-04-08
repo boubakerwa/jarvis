@@ -39,6 +39,13 @@ def _optional_model(key: str) -> str | None:
     return _normalize_legacy_model_name(value)
 
 
+def _env_bool(key: str, default: bool = False) -> bool:
+    value = os.getenv(key)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 # Optional with defaults
 OPENROUTER_BASE_URL: str = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api")
 CLAUDE_MODEL: str = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
@@ -50,6 +57,7 @@ OPENROUTER_MODEL_VISION: str | None = _optional_model("OPENROUTER_MODEL_VISION")
 MAX_TOKENS: int = int(os.getenv("MAX_TOKENS", "4096"))
 GMAIL_POLL_INTERVAL: int = int(os.getenv("GMAIL_POLL_INTERVAL", "300"))
 GMAIL_START_DATE: str = os.getenv("GMAIL_START_DATE", "").strip()
+TELEGRAM_EMAIL_SUMMARY_NOTIFICATIONS: bool = _env_bool("TELEGRAM_EMAIL_SUMMARY_NOTIFICATIONS", True)
 JARVIS_TIMEZONE: str = os.getenv("JARVIS_TIMEZONE", "").strip()
 JARVIS_DB_PATH: str = os.getenv("JARVIS_DB_PATH", "./data/jarvis_memory.db")
 JARVIS_CHROMA_PATH: str = os.getenv("JARVIS_CHROMA_PATH", "./data/jarvis_chroma")

@@ -5,7 +5,7 @@ from typing import Optional
 
 from config import settings
 from core.llmops import record_llm_call
-from core.llm_client import create_llm_client, get_model_name
+from core.llm_client import call_with_free_model_retry, create_llm_client, get_model_name
 from core.prompts import build_system_prompt
 from core.time_utils import (
     contains_explicit_date,
@@ -153,6 +153,43 @@ TOOLS: list[dict] = [
                 "content": {"type": "string", "description": "Markdown content to append."},
             },
             "required": ["path", "content"],
+        },
+    },
+    {
+        "name": "update_note",
+        "description": (
+            "Modify an existing note in the shared Obsidian notes workspace. "
+            "Either replace the full Markdown content or replace exact text inside the note."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Existing note path."},
+                "content": {
+                    "type": "string",
+                    "description": (
+                        "Full Markdown content that should replace the current note. "
+                        "When omitted, use find_text and replace_with instead."
+                    ),
+                },
+                "find_text": {
+                    "type": "string",
+                    "description": "Exact existing text to replace inside the note.",
+                },
+                "replace_with": {
+                    "type": "string",
+                    "description": "Replacement text for find_text. Can be empty to remove text.",
+                },
+                "replace_all": {"type": "boolean", "default": False},
+                "preserve_frontmatter": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": (
+                        "When replacing the full note content, keep existing frontmatter unless the new content already includes one."
+                    ),
+                },
+            },
+            "required": ["path"],
         },
     },
     {
@@ -355,12 +392,15 @@ class JarvisAgent:
             started_at = datetime.now(timezone.utc).isoformat()
             started_clock = monotonic()
             try:
-                response = self._client.messages.create(
-                    model=model_name,
-                    max_tokens=settings.MAX_TOKENS,
-                    system=system_prompt,
-                    tools=TOOLS,
-                    messages=messages,
+                response = call_with_free_model_retry(
+                    lambda: self._client.messages.create(
+                        model=model_name,
+                        max_tokens=settings.MAX_TOKENS,
+                        system=system_prompt,
+                        tools=TOOLS,
+                        messages=messages,
+                    ),
+                    model_name,
                 )
             except Exception as exc:
                 record_llm_call(
@@ -429,6 +469,8 @@ class JarvisAgent:
                 return self._tool_create_note(inputs)
             elif name == "append_note":
                 return self._tool_append_note(inputs)
+            elif name == "update_note":
+                return self._tool_update_note(inputs)
             elif name == "search_notes":
                 return self._tool_search_notes(inputs)
             elif name == "read_note":
@@ -552,6 +594,24 @@ class JarvisAgent:
         if not self._notes:
             return "Notes workspace not initialised."
         result = self._notes.append_note(inputs["path"], inputs["content"])
+        return f"Note updated: {result['path']}."
+
+    def _tool_update_note(self, inputs: dict) -> str:
+        if not self._notes:
+            return "Notes workspace not initialised."
+        result = self._notes.update_note(
+            inputs["path"],
+            content=inputs.get("content"),
+            find_text=inputs.get("find_text"),
+            replace_with=inputs.get("replace_with"),
+            replace_all=inputs.get("replace_all", False),
+            preserve_frontmatter=inputs.get("preserve_frontmatter", True),
+        )
+        if result["mode"] == "replace_text":
+            return (
+                f"Note updated: {result['path']} "
+                f"({result['replacement_count']} replacement{'s' if result['replacement_count'] != 1 else ''})."
+            )
         return f"Note updated: {result['path']}."
 
     def _tool_search_notes(self, inputs: dict) -> str:
