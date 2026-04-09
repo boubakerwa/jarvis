@@ -127,6 +127,7 @@ class MemoryItem:
 class LinkedInDraftItem:
     draft_id: str
     lookup_id: str
+    can_retry: bool
     headline: str
     hook: str
     full_post: str
@@ -1006,16 +1007,18 @@ def _load_linkedin_drafts_from_sqlite(limit: int = 20) -> tuple[list[LinkedInDra
         except Exception:
             tags = []
         fallback_title = _prettify_linkedin_title(str(r.get("obsidian_filename", "") or r.get("id", "")[:8]))
-        note_text, _, _ = _read_note_content(
+        note_text, _, note_loaded = _read_note_content(
             str(r.get("obsidian_path", "")),
             notes_manager=notes_manager,
             max_chars=50_000,
         )
+        effective_status = _effective_linkedin_status(r, note_loaded=note_loaded, content=note_text)
         headline, hook = _extract_linkedin_headline_and_excerpt(note_text, fallback_title)
         items.append(
             LinkedInDraftItem(
                 draft_id=str(r.get("id", ""))[:8],
                 lookup_id=str(r.get("id", "")),
+                can_retry=effective_status != "pending_generation",
                 headline=headline,
                 hook=hook,
                 full_post="",
@@ -1029,7 +1032,7 @@ def _load_linkedin_drafts_from_sqlite(limit: int = 20) -> tuple[list[LinkedInDra
                 generation_mode="llm",
                 created_at=str(r.get("created_at", ""))[:19].replace("T", " "),
                 updated_at=str(r.get("updated_at", ""))[:19].replace("T", " "),
-                status=str(r.get("status", "")),
+                status=effective_status,
                 obsidian_path=str(r.get("obsidian_path", "")),
                 obsidian_filename=str(r.get("obsidian_filename", "")),
                 attempts=int(r.get("attempts", 0)),
@@ -1068,6 +1071,21 @@ def _build_linkedin_scaffold(row: dict[str, Any]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _is_linkedin_scaffold_content(row: dict[str, Any], content: str) -> bool:
+    return str(content or "").strip() == _build_linkedin_scaffold(row).strip()
+
+
+def _effective_linkedin_status(row: dict[str, Any], *, note_loaded: bool, content: str) -> str:
+    raw_status = str(row.get("status", "") or "")
+    note_path = str(row.get("obsidian_path", "") or "")
+    if raw_status == "ready" and note_path:
+        if not note_loaded or not str(content or "").strip():
+            return "needs_attention"
+        if _is_linkedin_scaffold_content(row, content):
+            return "needs_attention"
+    return raw_status
+
+
 def _linkedin_editor_payload(draft_id_prefix: str) -> tuple[dict[str, Any], int]:
     row = _load_linkedin_draft_row(draft_id_prefix)
     if row is None:
@@ -1093,6 +1111,13 @@ def _linkedin_editor_payload(draft_id_prefix: str) -> tuple[dict[str, Any], int]
     if not content:
         content = _build_linkedin_scaffold(row)
 
+    effective_status = _effective_linkedin_status(row, note_loaded=note_loaded, content=content)
+    if effective_status == "needs_attention" and str(row.get("status", "")) == "ready":
+        if note_loaded and _is_linkedin_scaffold_content(row, content):
+            detail = "Saved note still contains the fallback scaffold. Re-trigger this post to regenerate it."
+        elif note_path:
+            detail = "Could not read the saved post from Obsidian. Showing a fallback scaffold."
+
     headline, excerpt = _extract_linkedin_headline_and_excerpt(
         content,
         _prettify_linkedin_title(str(row.get("obsidian_filename", "") or row.get("id", "")[:8])),
@@ -1102,7 +1127,8 @@ def _linkedin_editor_payload(draft_id_prefix: str) -> tuple[dict[str, Any], int]
             "draftId": str(row.get("id", "")),
             "headline": headline,
             "excerpt": excerpt,
-            "status": str(row.get("status", "")),
+            "status": effective_status,
+            "rawStatus": str(row.get("status", "")),
             "voice": str(row.get("voice", "")),
             "pillarLabel": str(row.get("pillar_label", "")),
             "sourceType": str(row.get("source_type", "")),
@@ -1111,6 +1137,7 @@ def _linkedin_editor_payload(draft_id_prefix: str) -> tuple[dict[str, Any], int]
             "obsidianFilename": str(row.get("obsidian_filename", "")),
             "modifiedAt": modified_at or str(row.get("updated_at", "")),
             "editable": editable,
+            "canRetry": effective_status != "pending_generation",
             "detail": detail,
             "content": content,
         },
@@ -1160,6 +1187,46 @@ def _save_linkedin_draft_content(draft_id_prefix: str, content: str) -> tuple[di
     if status_code == 200:
         payload["detail"] = "Saved to Obsidian."
     return payload, status_code
+
+
+def _retry_linkedin_draft_processing(draft_id_prefix: str) -> tuple[dict[str, Any], int]:
+    row = _load_linkedin_draft_row(draft_id_prefix)
+    if row is None:
+        return {"error": "LinkedIn draft not found."}, 404
+
+    notes_manager = _build_notes_manager()
+    if notes_manager is None:
+        return {"error": "Obsidian vault is not configured for LinkedIn post processing on this machine."}, 503
+
+    try:
+        from linkedin.processor import process_pending_drafts
+        from linkedin.sqlite_store import get_by_id, requeue_draft
+    except Exception as exc:
+        logger.warning("Dashboard LinkedIn retry imports failed: %s", exc)
+        return {"error": f"Failed to load LinkedIn processor: {exc}"}, 500
+
+    try:
+        requeued = requeue_draft(str(row.get("id", "")), clear_artefacts=True)
+        if requeued is None:
+            return {"error": "LinkedIn draft not found."}, 404
+        process_pending_drafts(notes_manager, notifier=None)
+    except Exception as exc:
+        logger.warning("Dashboard LinkedIn retry failed for %s: %s", row.get("id", ""), exc)
+        return {"error": f"Failed to re-trigger post: {exc}"}, 500
+
+    updated = get_by_id(str(row.get("id", ""))) or row
+    payload, status_code = _linkedin_editor_payload(str(updated.get("id", "")))
+    if status_code != 200:
+        return payload, status_code
+
+    final_status = str(updated.get("status", "") or "")
+    if final_status == "ready":
+        payload["detail"] = "Post re-triggered and saved to Obsidian."
+    elif final_status == "failed":
+        payload["detail"] = f"Post re-triggered but failed again: {str(updated.get('last_error', '')).strip() or 'unknown error'}"
+    else:
+        payload["detail"] = "Post re-triggered and queued for processing."
+    return payload, 200
 
 
 def collect_snapshot(
@@ -1969,7 +2036,7 @@ def _render_linkedin_content(snapshot: DashboardSnapshot) -> str:
           Send <code>/linkedin &lt;text or URL&gt;</code> from Telegram to create your first draft.</p>
         </div>"""
     else:
-        STATUS_ICON = {"ready": "✅", "pending_generation": "⏳", "failed": "❌"}
+        STATUS_ICON = {"ready": "✅", "pending_generation": "⏳", "failed": "❌", "needs_attention": "⚠️"}
         cards_html = ""
         for item in drafts:
             tags_html = " ".join(
@@ -2450,19 +2517,20 @@ def _render_linkedin_content(snapshot: DashboardSnapshot) -> str:
         <div class="li-editor-shell">
           <div class="li-empty" data-linkedin-empty>
             <span class="li-tag">MARKDOWN WORKSPACE</span>
-            <p class="li-empty-text">Click an article to open it here.<br>
+            <p class="li-empty-text">Click a post to open it here.<br>
             Switch between raw Markdown and preview, then save back to Obsidian.</p>
           </div>
           <div class="li-editor" data-linkedin-panel hidden>
             <div class="li-editor-header">
               <div>
-                <div class="li-editor-kicker">ARTICLE EDITOR</div>
+                <div class="li-editor-kicker">POST EDITOR</div>
                 <h3 class="li-editor-title" data-linkedin-title>Untitled draft</h3>
                 <div class="li-editor-meta" data-linkedin-meta>Open a draft to inspect or edit its markdown.</div>
               </div>
               <div class="li-editor-controls">
                 <button type="button" class="li-mode-btn is-active" data-linkedin-mode="preview">Preview</button>
                 <button type="button" class="li-mode-btn" data-linkedin-mode="edit">Edit</button>
+                <button type="button" class="li-mode-btn" data-linkedin-retry>Re-trigger</button>
                 <button type="button" class="li-save-btn" data-linkedin-save disabled>Save</button>
               </div>
             </div>
@@ -2955,6 +3023,10 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
         return tabContent.querySelector("[data-linkedin-save]");
       }}
 
+      function linkedInRetryButton() {{
+        return tabContent.querySelector("[data-linkedin-retry]");
+      }}
+
       function hasUnsavedLinkedInChanges() {{
         return Boolean(
           activeTab === "linkedin" &&
@@ -3199,6 +3271,7 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
         const editor = linkedInEditor();
         const preview = linkedInPreview();
         const saveButton = linkedInSaveButton();
+        const retryButton = linkedInRetryButton();
         if (!panel || !editor || !preview || !title || !meta) {{
           return;
         }}
@@ -3224,6 +3297,9 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
         preview.innerHTML = renderMarkdown(currentContent || "");
         if (saveButton) {{
           saveButton.disabled = !detail.editable || linkedinState.saveInFlight;
+        }}
+        if (retryButton) {{
+          retryButton.disabled = !detail.canRetry || linkedinState.saveInFlight;
         }}
         setLinkedInStatus(detail.detail || "", "");
         setLinkedInMode(linkedinState.mode);
@@ -3266,6 +3342,7 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
         const draftId = linkedinState.selectedDraftId;
         const editor = linkedInEditor();
         const saveButton = linkedInSaveButton();
+        const retryButton = linkedInRetryButton();
         if (!draftId || !editor || linkedinState.saveInFlight) {{
           return;
         }}
@@ -3279,6 +3356,9 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
         linkedinState.saveInFlight = true;
         if (saveButton) {{
           saveButton.disabled = true;
+        }}
+        if (retryButton) {{
+          retryButton.disabled = true;
         }}
         setLinkedInStatus("Saving to Obsidian…", "");
         const controller = trackController(new AbortController());
@@ -3305,6 +3385,65 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
           }}
         }} finally {{
           linkedinState.saveInFlight = false;
+          if (saveButton) {{
+            const latestDetail = linkedinState.detailCache.get(draftId);
+            saveButton.disabled = !latestDetail || !latestDetail.editable;
+          }}
+          if (retryButton) {{
+            const latestDetail = linkedinState.detailCache.get(draftId);
+            retryButton.disabled = !latestDetail || !latestDetail.canRetry;
+          }}
+          untrackController(controller);
+        }}
+      }}
+
+      async function retryLinkedInDraft() {{
+        const draftId = linkedinState.selectedDraftId;
+        const retryButton = linkedInRetryButton();
+        const saveButton = linkedInSaveButton();
+        if (!draftId || linkedinState.saveInFlight) {{
+          return;
+        }}
+        if (linkedinState.dirtyContent.has(draftId)) {{
+          setLinkedInStatus("Save or discard your edits before re-triggering this post.", "error");
+          return;
+        }}
+
+        linkedinState.saveInFlight = true;
+        if (retryButton) {{
+          retryButton.disabled = true;
+        }}
+        if (saveButton) {{
+          saveButton.disabled = true;
+        }}
+        setLinkedInStatus("Re-triggering post generation…", "");
+        const controller = trackController(new AbortController());
+        try {{
+          const payload = await fetchJson(
+            "/api/linkedin/drafts/" + encodeURIComponent(draftId) + "/retry",
+            {{
+              method: "POST",
+              signal: controller.signal,
+              headers: {{
+                "Content-Type": "application/json",
+              }},
+              body: JSON.stringify({{}}),
+            }}
+          );
+          linkedinState.detailCache.set(draftId, payload);
+          applyLinkedInDetail(payload);
+          void refreshCurrentTab();
+        }} catch (error) {{
+          if (error.name !== "AbortError") {{
+            setLinkedInStatus(error.message || "Failed to re-trigger post.", "error");
+            console.error(error);
+          }}
+        }} finally {{
+          linkedinState.saveInFlight = false;
+          if (retryButton) {{
+            const latestDetail = linkedinState.detailCache.get(draftId);
+            retryButton.disabled = !latestDetail || !latestDetail.canRetry;
+          }}
           if (saveButton) {{
             const latestDetail = linkedinState.detailCache.get(draftId);
             saveButton.disabled = !latestDetail || !latestDetail.editable;
@@ -3467,6 +3606,12 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
         const saveButton = event.target.closest("[data-linkedin-save]");
         if (saveButton && tabContent.contains(saveButton)) {{
           void saveLinkedInDraft();
+          return;
+        }}
+
+        const retryButton = event.target.closest("[data-linkedin-retry]");
+        if (retryButton && tabContent.contains(retryButton)) {{
+          void retryLinkedInDraft();
         }}
       }});
 
@@ -3661,7 +3806,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_error(404, "Not Found")
             return
 
-        draft_id_prefix = parsed.path.rsplit("/", 1)[-1]
+        retry_request = parsed.path.endswith("/retry")
+        draft_id_prefix = parsed.path.split("/api/linkedin/drafts/", 1)[1].strip("/")
+        if retry_request:
+            draft_id_prefix = draft_id_prefix[: -len("/retry")].rstrip("/")
         try:
             content_length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
@@ -3679,10 +3827,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
             )
             return
 
-        response_payload, status_code = _save_linkedin_draft_content(
-            draft_id_prefix,
-            str(payload.get("content", "")),
-        )
+        if retry_request:
+            response_payload, status_code = _retry_linkedin_draft_processing(draft_id_prefix)
+        else:
+            response_payload, status_code = _save_linkedin_draft_content(
+                draft_id_prefix,
+                str(payload.get("content", "")),
+            )
         response = json.dumps(response_payload).encode("utf-8")
         _write_response(
             self,
