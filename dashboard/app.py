@@ -308,18 +308,18 @@ def _read_note_content(
     *,
     notes_manager: NotesManager | None = None,
     max_chars: int = 500_000,
-) -> tuple[str, str]:
+) -> tuple[str, str, bool]:
     if not note_path:
-        return "", ""
+        return "", "", False
     manager = notes_manager or _build_notes_manager()
     if manager is None:
-        return "", ""
+        return "", "", False
     try:
         note = manager.read_note(note_path, max_chars=max_chars)
-        return str(note.get("content", "")), str(note.get("modified_at", ""))
+        return str(note.get("content", "")), str(note.get("modified_at", "")), True
     except Exception as exc:
         logger.warning("Dashboard note read failed for %s: %s", note_path, exc)
-        return "", ""
+        return "", "", False
 
 
 def _read_lines(path: Path, limit: int = 200) -> list[str]:
@@ -1006,7 +1006,7 @@ def _load_linkedin_drafts_from_sqlite(limit: int = 20) -> tuple[list[LinkedInDra
         except Exception:
             tags = []
         fallback_title = _prettify_linkedin_title(str(r.get("obsidian_filename", "") or r.get("id", "")[:8]))
-        note_text, _ = _read_note_content(
+        note_text, _, _ = _read_note_content(
             str(r.get("obsidian_path", "")),
             notes_manager=notes_manager,
             max_chars=50_000,
@@ -1079,11 +1079,12 @@ def _linkedin_editor_payload(draft_id_prefix: str) -> tuple[dict[str, Any], int]
     modified_at = ""
     detail = ""
     editable = False
+    note_loaded = False
 
     if note_path and notes_manager is not None:
-        content, modified_at = _read_note_content(note_path, notes_manager=notes_manager)
+        content, modified_at, note_loaded = _read_note_content(note_path, notes_manager=notes_manager)
         editable = True
-        detail = "Loaded from Obsidian."
+        detail = "Loaded from Obsidian." if note_loaded and content else "Could not read the saved post from Obsidian. Showing a fallback scaffold."
     elif note_path:
         detail = "Obsidian vault is not configured for editing on this machine."
     else:
@@ -1993,7 +1994,7 @@ def _render_linkedin_content(snapshot: DashboardSnapshot) -> str:
                 f'<p class="li-card-snippet">{html.escape(item.hook)}</p>'
                 if item.hook else ""
             )
-            open_cta = "Open article" if item.obsidian_path else "Awaiting note"
+            open_cta = "Open post" if item.obsidian_path else "Awaiting note"
             cards_html += f"""
             <button type="button" class="li-card li-card--{html.escape(item.status)}{' li-card--disabled' if not item.obsidian_path else ''}" data-linkedin-open="{html.escape(item.lookup_id)}"{' disabled aria-disabled="true"' if not item.obsidian_path else ''}>
               <div class="li-card-header">
@@ -3241,7 +3242,7 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
           return;
         }}
 
-        setLinkedInStatus("Loading article…", "");
+        setLinkedInStatus("Loading post…", "");
         const controller = trackController(new AbortController());
         try {{
           const detail = await fetchJson(
@@ -3253,7 +3254,7 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
           }}
         }} catch (error) {{
           if (error.name !== "AbortError") {{
-            setLinkedInStatus(error.message || "Failed to load article.", "error");
+            setLinkedInStatus(error.message || "Failed to load post.", "error");
             console.error(error);
           }}
         }} finally {{
@@ -3299,7 +3300,7 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
           setLinkedInStatus(payload.detail || "Saved to Obsidian.", "success");
         }} catch (error) {{
           if (error.name !== "AbortError") {{
-            setLinkedInStatus(error.message || "Failed to save article.", "error");
+            setLinkedInStatus(error.message || "Failed to save post.", "error");
             console.error(error);
           }}
         }} finally {{

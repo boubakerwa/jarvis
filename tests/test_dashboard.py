@@ -563,6 +563,7 @@ class DashboardTests(unittest.TestCase):
 
         self.assertIn('data-linkedin-root', html)
         self.assertIn('data-linkedin-open="draft-12345678"', html)
+        self.assertIn("Open post", html)
         self.assertIn('data-linkedin-panel hidden', html)
         self.assertIn('replace(/\\r\\n/g, "\\n")', html)
         self.assertIn('source.split("\\n")', html)
@@ -617,6 +618,48 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(updated_status, 200)
         self.assertEqual(updated_payload["detail"], "Saved to Obsidian.")
         self.assertIn("Updated markdown body.", saved_text)
+
+    def test_linkedin_editor_payload_reports_fallback_when_note_read_fails(self):
+        with TemporaryDirectory() as td:
+            temp_root = Path(td)
+            (temp_root / "logs").mkdir()
+            (temp_root / "data").mkdir()
+            (temp_root / "vault" / "LinkedIn" / "2026-04").mkdir(parents=True)
+            (temp_root / "logs" / "jarvis.log").write_text(
+                "\n".join(
+                    [
+                        "2026-04-05 15:00:00 [INFO] __main__: Starting Jarvis...",
+                        "2026-04-05 15:03:00 [INFO] telegram.ext.Application: Application started",
+                    ]
+                )
+            )
+            db_path = temp_root / "data" / "jarvis_memory.db"
+            create_memory_db(db_path)
+            note_path = "LinkedIn/2026-04/test-post_draft-12.md"
+            insert_linkedin_draft(
+                db_path,
+                draft_id="draft-12345678",
+                obsidian_path=note_path,
+                obsidian_filename="test_post_draft-12",
+                source_text="Original source text",
+            )
+
+            module = load_module("tested_dashboard_linkedin_fallback", "dashboard/app.py")
+            configure_dashboard_module(module, temp_root)
+
+            original = module._read_note_content
+            module._read_note_content = lambda *args, **kwargs: ("", "", False)
+            try:
+                payload, status_code = module._linkedin_editor_payload("draft-12")
+            finally:
+                module._read_note_content = original
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(
+            payload["detail"],
+            "Could not read the saved post from Obsidian. Showing a fallback scaffold.",
+        )
+        self.assertIn("Original source text", payload["content"])
 
 
 if __name__ == "__main__":
