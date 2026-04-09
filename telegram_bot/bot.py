@@ -559,13 +559,14 @@ class TelegramBot:
                 )
                 response = f"Sorry, something went wrong: {e}"
 
-            for chunk in _split_message(response, 4096):
+            response_with_cost = response.rstrip() + "\n\n" + _total_cost_footer()
+            for chunk in _split_message(response_with_cost, 4096):
                 await update.message.reply_text(chunk)
             record_activity(
                 event="telegram_message_replied",
                 component="telegram",
                 summary="Sent Telegram chat reply",
-                metadata={"chunk_count": len(_split_message(response, 4096))},
+                metadata={"chunk_count": len(_split_message(response_with_cost, 4096))},
             )
 
     async def _handle_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -713,6 +714,11 @@ def _format_cost(value: float | None) -> str:
     if value >= 0.01:
         return f"${value:.4f}"
     return f"${value:.6f}"
+
+
+def _total_cost_footer() -> str:
+    summary = _load_llmops_summary()
+    return f"Total LLM cost so far: {_format_cost(summary['estimated_cost_usd'])}"
 
 
 def _load_llmops_summary(limit: int = 500) -> dict[str, Any]:

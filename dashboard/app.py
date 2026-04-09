@@ -126,6 +126,7 @@ class MemoryItem:
 @dataclass
 class LinkedInDraftItem:
     draft_id: str
+    lookup_id: str
     headline: str
     hook: str
     full_post: str
@@ -1014,6 +1015,7 @@ def _load_linkedin_drafts_from_sqlite(limit: int = 20) -> tuple[list[LinkedInDra
         items.append(
             LinkedInDraftItem(
                 draft_id=str(r.get("id", ""))[:8],
+                lookup_id=str(r.get("id", "")),
                 headline=headline,
                 hook=hook,
                 full_post="",
@@ -1096,7 +1098,7 @@ def _linkedin_editor_payload(draft_id_prefix: str) -> tuple[dict[str, Any], int]
     )
     return (
         {
-            "draftId": str(row.get("id", ""))[:8],
+            "draftId": str(row.get("id", "")),
             "headline": headline,
             "excerpt": excerpt,
             "status": str(row.get("status", "")),
@@ -1993,7 +1995,7 @@ def _render_linkedin_content(snapshot: DashboardSnapshot) -> str:
             )
             open_cta = "Open article" if item.obsidian_path else "Awaiting note"
             cards_html += f"""
-            <button type="button" class="li-card li-card--{html.escape(item.status)}{' li-card--disabled' if not item.obsidian_path else ''}" data-linkedin-open="{html.escape(item.draft_id)}"{' disabled aria-disabled="true"' if not item.obsidian_path else ''}>
+            <button type="button" class="li-card li-card--{html.escape(item.status)}{' li-card--disabled' if not item.obsidian_path else ''}" data-linkedin-open="{html.escape(item.lookup_id)}"{' disabled aria-disabled="true"' if not item.obsidian_path else ''}>
               <div class="li-card-header">
                 <div class="li-card-meta">
                   <span class="li-tag">{html.escape(item.pillar_label.upper() or "LINKEDIN")}</span>

@@ -562,7 +562,7 @@ class DashboardTests(unittest.TestCase):
             html = module._render_snapshot(snapshot, tab="linkedin")
 
         self.assertIn('data-linkedin-root', html)
-        self.assertIn('data-linkedin-open="draft-12"', html)
+        self.assertIn('data-linkedin-open="draft-12345678"', html)
         self.assertIn('data-linkedin-panel hidden', html)
         self.assertIn('replace(/\\r\\n/g, "\\n")', html)
         self.assertIn('source.split("\\n")', html)
@@ -604,6 +604,7 @@ class DashboardTests(unittest.TestCase):
             payload, status_code = module._linkedin_editor_payload("draft-12")
             self.assertEqual(status_code, 200)
             self.assertTrue(payload["editable"])
+            self.assertEqual(payload["draftId"], "draft-12345678")
             self.assertEqual(payload["headline"], "Test Post")
             self.assertIn("Hello markdown world.", payload["content"])
 

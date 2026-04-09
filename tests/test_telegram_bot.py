@@ -37,14 +37,21 @@ class FakeApplication:
 class FakeMessage:
     def __init__(self):
         self.calls = []
+        self.text = "Hello"
+        self.actions = []
+        self.chat = SimpleNamespace(send_action=self._send_action)
 
     async def reply_text(self, text, parse_mode=None):
         self.calls.append((text, parse_mode))
+
+    async def _send_action(self, action):
+        self.actions.append(action)
 
 
 class FakeUpdate:
     def __init__(self):
         self.message = FakeMessage()
+        self.effective_user = SimpleNamespace(id=12345)
 
 
 class FakeProactiveBot:
@@ -225,6 +232,39 @@ class TelegramBotTests(unittest.TestCase):
         self.assertEqual(instance.token, "token-123")
         self.assertEqual(instance.events, ["enter", "exit"])
         self.assertEqual(instance.calls, [(67890, "Short lived session")])
+
+    def test_handle_message_appends_total_cost_footer(self):
+        module = load_module("tested_telegram_bot_message_costs", "telegram_bot/bot.py")
+        bot = module.TelegramBot.__new__(module.TelegramBot)
+        bot._agent = SimpleNamespace(chat=lambda text: "Hello from Marvis")
+        update = FakeUpdate()
+
+        with patch.object(
+            module,
+            "_load_llmops_summary",
+            return_value={
+                "call_count": 3,
+                "success_count": 3,
+                "error_count": 0,
+                "avg_latency_ms": 100.0,
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "total_tokens": 150,
+                "estimated_cost_usd": 0.012345,
+                "priced_call_count": 3,
+                "model_count": 1,
+                "last_recorded_at": "2026-04-09T10:00:00+00:00",
+                "top_tasks": [],
+            },
+        ), patch.object(module, "record_activity"), patch.object(module, "record_issue"), patch.object(module.logger, "info"):
+            asyncio.run(bot._handle_message(update, SimpleNamespace()))
+
+        self.assertEqual(update.message.actions, ["typing"])
+        self.assertEqual(len(update.message.calls), 1)
+        text, parse_mode = update.message.calls[0]
+        self.assertIsNone(parse_mode)
+        self.assertIn("Hello from Marvis", text)
+        self.assertIn("Total LLM cost so far: $0.0123", text)
 
 
 if __name__ == "__main__":
