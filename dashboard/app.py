@@ -3313,12 +3313,12 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
         linkedinState.selectedDraftId = draftId;
         highlightLinkedInSelection();
 
-        if (!force && linkedinState.detailCache.has(draftId)) {{
-          applyLinkedInDetail(linkedinState.detailCache.get(draftId));
-          return;
+        const cachedDetail = linkedinState.detailCache.get(draftId);
+        if (cachedDetail) {{
+          applyLinkedInDetail(cachedDetail);
+        }} else {{
+          setLinkedInStatus("Loading post…", "");
         }}
-
-        setLinkedInStatus("Loading post…", "");
         const controller = trackController(new AbortController());
         try {{
           const detail = await fetchJson(
@@ -3461,9 +3461,8 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
           const detail = linkedinState.detailCache.get(linkedinState.selectedDraftId);
           if (detail) {{
             applyLinkedInDetail(detail);
-          }} else {{
-            void openLinkedInDraft(linkedinState.selectedDraftId);
           }}
+          void openLinkedInDraft(linkedinState.selectedDraftId, true);
         }}
       }}
 

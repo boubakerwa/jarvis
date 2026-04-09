@@ -572,6 +572,7 @@ class DashboardTests(unittest.TestCase):
         self.assertIn('source.split("\\n")', html)
         self.assertIn('trimmed.match(/^(#{1,6})\\s+(.*)$/)', html)
         self.assertIn('data-linkedin-save', html)
+        self.assertIn('void openLinkedInDraft(linkedinState.selectedDraftId, true);', html)
 
     def test_linkedin_editor_payload_and_save_round_trip_note(self):
         with TemporaryDirectory() as td:
