@@ -26,11 +26,12 @@ _STATE_FILE = "./data/gmail_state.txt"
 
 
 class GmailWatcher:
-    def __init__(self, on_email: Callable[[ParsedEmail], None]):
+    def __init__(self, on_email: Callable[[ParsedEmail], None], on_batch: Callable[[list[ParsedEmail]], None] | None = None):
         """
         on_email: callback invoked for each new unread email.
         """
         self._on_email = on_email
+        self._on_batch = on_batch
         self._service = self._build_service()
         self._cutoff_date, self._last_history_id = self._load_state()
         logger.info("Gmail watcher cutoff date: %s", self._cutoff_date)
@@ -93,10 +94,12 @@ class GmailWatcher:
             return 0
 
         logger.info("Processing %d new email(s)", len(unread))
+        batch: list[ParsedEmail] = []
         for message_id in unread:
             try:
                 email = parse_message(self._service, message_id)
                 self._on_email(email)
+                batch.append(email)
                 self._mark_read(message_id)
                 self._save_state(message_id)
             except Exception:
@@ -109,6 +112,8 @@ class GmailWatcher:
                     summary="Failed to process Gmail message",
                     metadata={"message_id": message_id},
                 )
+        if batch and self._on_batch:
+            self._on_batch(batch)
         return len(unread)
 
     def _fetch_unread_ids(self) -> list[str]:
