@@ -2058,8 +2058,8 @@ def _render_linkedin_content(snapshot: DashboardSnapshot) -> str:
                 if item.attempts > 1 else ""
             )
             snippet_html = (
-                f'<p class="li-card-snippet">{html.escape(item.hook)}</p>'
-                if item.hook else ""
+                f'<p class="li-card-snippet" data-linkedin-card-snippet>{html.escape(item.hook)}</p>'
+                if item.hook else '<p class="li-card-snippet" data-linkedin-card-snippet hidden></p>'
             )
             open_cta = "Open post" if item.obsidian_path else "Awaiting note"
             cards_html += f"""
@@ -2070,9 +2070,9 @@ def _render_linkedin_content(snapshot: DashboardSnapshot) -> str:
                   {parent_html}
                   {attempts_html}
                 </div>
-                <div class="li-card-status">{status_icon} <span class="li-status-label">{status_label}</span></div>
+                <div class="li-card-status" data-linkedin-card-status>{status_icon} <span class="li-status-label" data-linkedin-card-status-label>{status_label}</span></div>
               </div>
-              <h3 class="li-headline">{html.escape(item.headline)}</h3>
+              <h3 class="li-headline" data-linkedin-card-headline>{html.escape(item.headline)}</h3>
               {snippet_html}
               <div class="li-meta-row">
                 <span class="li-meta-item">VOICE <span class="li-meta-value">{html.escape(item.voice.upper())}</span></span>
@@ -3027,6 +3027,53 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
         return tabContent.querySelector("[data-linkedin-retry]");
       }}
 
+      function linkedInCardById(draftId) {{
+        for (const button of tabContent.querySelectorAll("[data-linkedin-open]")) {{
+          if (button.dataset.linkedinOpen === draftId) {{
+            return button;
+          }}
+        }}
+        return null;
+      }}
+
+      function syncLinkedInCard(detail) {{
+        if (!detail || !detail.draftId) {{
+          return;
+        }}
+        const card = linkedInCardById(detail.draftId);
+        if (!card) {{
+          return;
+        }}
+        const status = detail.status || detail.rawStatus || "";
+        const statusLabel = status ? String(status).replace(/_/g, " ").toUpperCase() : "";
+        const statusIcon = {{
+          ready: "✅",
+          pending_generation: "⏳",
+          failed: "❌",
+          needs_attention: "⚠️",
+        }}[status] || "·";
+        for (const name of ["ready", "pending_generation", "failed", "needs_attention"]) {{
+          card.classList.remove("li-card--" + name);
+        }}
+        if (status) {{
+          card.classList.add("li-card--" + status);
+        }}
+        const statusNode = card.querySelector("[data-linkedin-card-status]");
+        if (statusNode) {{
+          statusNode.innerHTML = statusIcon + ' <span class="li-status-label" data-linkedin-card-status-label>' + escapeHtml(statusLabel) + "</span>";
+        }}
+        const headlineNode = card.querySelector("[data-linkedin-card-headline]");
+        if (headlineNode && detail.headline) {{
+          headlineNode.textContent = detail.headline;
+        }}
+        const snippetNode = card.querySelector("[data-linkedin-card-snippet]");
+        if (snippetNode) {{
+          const excerpt = String(detail.excerpt || "").trim();
+          snippetNode.textContent = excerpt;
+          snippetNode.hidden = !excerpt;
+        }}
+      }}
+
       function hasUnsavedLinkedInChanges() {{
         return Boolean(
           activeTab === "linkedin" &&
@@ -3277,6 +3324,7 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
         }}
 
         linkedinState.detailCache.set(detail.draftId, detail);
+        syncLinkedInCard(detail);
         const currentContent = linkedinState.dirtyContent.has(detail.draftId)
           ? linkedinState.dirtyContent.get(detail.draftId)
           : detail.content;
