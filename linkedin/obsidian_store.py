@@ -110,12 +110,13 @@ def save_artefact(
     folder = _make_folder()
     body = _build_note_body(row, draft)
 
-    note_path = notes_manager.create_note(
+    result = notes_manager.create_note(
         title=title,
         body=body,
         folder=folder,
         unique=True,
     )
+    note_path = result["path"]
 
     logger.info(
         "LinkedIn artefact saved to Obsidian: %s → %s",

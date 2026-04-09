@@ -182,6 +182,7 @@ _REWRITE_SYSTEM_PROMPT = (
 
 
 def _build_model_prompt(source: dict, voice: str) -> str:
+    media_notes = source.get("media_summary") or source.get("manual_media_notes") or "None"
     lines = list(WRITER_CONTEXT) + [
         "",
         "Goal: write a LinkedIn post that helps the user build a thoughtful personal brand from a sourced insight.",
@@ -189,7 +190,7 @@ def _build_model_prompt(source: dict, voice: str) -> str:
         f"Voice guide: {VOICE_GUIDES[voice]}",
         f"Source type: {source.get('type', 'manual')}",
         f"Author: {source.get('author_name') or source.get('author_handle') or 'Unknown'}",
-        f"Media notes: {source.get('manual_media_notes') or 'None'}",
+        f"Media notes: {media_notes}",
         f"Source text:\n{source.get('text', '')}",
     ]
     return "\n\n".join(lines)
@@ -272,6 +273,7 @@ def _call_llm(prompt: str, system: str, task_name: str) -> dict:
         )
         raise RuntimeError(f"LLM call failed for {task_name}: {exc}") from exc
 
+    stop_reason = getattr(response, "stop_reason", None)
     text = "".join(
         getattr(b, "text", "")
         for b in getattr(response, "content", [])
@@ -280,6 +282,26 @@ def _call_llm(prompt: str, system: str, task_name: str) -> dict:
     # Strip markdown fences
     text = re.sub(r"```(?:json)?\s*", "", text)
     text = re.sub(r"```", "", text).strip()
+
+    if not text:
+        # Log the raw response so we can see what actually came back
+        raw_content = getattr(response, "content", [])
+        logger.warning(
+            "LLM returned empty text for %s (stop_reason=%r, content_blocks=%d, raw=%r)",
+            task_name, stop_reason, len(raw_content), raw_content,
+        )
+        record_llm_call(
+            task=task_name,
+            model=model,
+            status="empty_response",
+            started_at=started_at,
+            latency_ms=(time.monotonic() - started) * 1000,
+            error=f"Empty text response (stop_reason={stop_reason})",
+        )
+        raise RuntimeError(
+            f"LLM returned empty response for {task_name} (stop_reason={stop_reason}). "
+            "The model may have refused or been truncated."
+        )
 
     record_llm_call(
         task=task_name,
@@ -292,6 +314,10 @@ def _call_llm(prompt: str, system: str, task_name: str) -> dict:
     try:
         return json.loads(text)
     except json.JSONDecodeError as exc:
+        logger.warning(
+            "LLM returned invalid JSON for %s (stop_reason=%r): %r",
+            task_name, stop_reason, text[:500],
+        )
         raise RuntimeError(f"LLM returned invalid JSON for {task_name}: {exc}") from exc
 
 
@@ -329,7 +355,7 @@ def normalize_voice(voice: str | None) -> str:
 
 def build_enqueue_payload(
     *,
-    text: str,
+    text: str = "",
     author: str = "",
     source_url: str = "",
     voice: str | None = None,
@@ -337,20 +363,44 @@ def build_enqueue_payload(
     rewrite_of: str = "",
     rewrite_instructions: str = "",
     preset_id: str = "",
+    # Pre-resolved X source (skip fetching if already done)
+    resolved_source: dict | None = None,
 ) -> dict:
     """
     Build the payload dict to pass to sqlite_store.enqueue().
     Does NOT call the LLM. Safe to call synchronously in the Telegram handler.
+
+    If source_url is an X/Twitter post URL and no resolved_source is given,
+    fetches the tweet content automatically via the public Twitter APIs.
+
     Returns a dict shaped to match what sqlite_store.enqueue() expects.
     """
+    from linkedin.x_resolver import is_x_post_url, resolve_x_post
+
     voice = normalize_voice(voice)
-    text = _clean(text)
-    if not text:
+
+    # --- Resolve X URL first if needed ---
+    if resolved_source is None and source_url and is_x_post_url(source_url):
+        resolved_source = resolve_x_post(source_url)
+
+    if resolved_source:
+        source_text = _clean(resolved_source.get("text") or text)
+        source_author = _clean(resolved_source.get("authorName") or resolved_source.get("authorHandle") or author)
+        source_type = "x-post"
+        canonical_url = resolved_source.get("canonicalUrl") or source_url
+        media_summary = resolved_source.get("mediaSummary") or ""
+    else:
+        source_text = _clean(text)
+        source_author = _clean(author)
+        source_type = "x-post" if _clean(source_url) else "manual"
+        canonical_url = _clean(source_url)
+        media_summary = ""
+
+    if not source_text:
         raise ValueError("Source text is required.")
 
-    source_type = "x-post" if _clean(source_url) else "manual"
-    pillar = _derive_pillar(text)
-    tags = _build_library_tags(text, source_type)
+    pillar = _derive_pillar(source_text)
+    tags = _build_library_tags(source_text, source_type)
     draft_id = str(uuid.uuid4())
 
     return {
@@ -358,10 +408,11 @@ def build_enqueue_payload(
         "voice": voice,
         "origin": origin,
         "source": {
-            "text": text,
-            "author_name": _clean(author),
-            "url": _clean(source_url),
+            "text": source_text,
+            "author_name": source_author,
+            "url": canonical_url,
             "type": source_type,
+            "media_summary": media_summary,
         },
         "library": {
             "pillar": pillar,
