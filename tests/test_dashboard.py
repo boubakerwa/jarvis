@@ -273,6 +273,59 @@ class DashboardTests(unittest.TestCase):
         self.assertNotIn('http-equiv="refresh"', html)
         self.assertIn('id="tab-content"', html)
 
+    def test_dashboard_runtime_info_flags_stale_process(self):
+        with TemporaryDirectory() as td:
+            temp_root = Path(td)
+            (temp_root / "logs").mkdir()
+            (temp_root / "data").mkdir()
+            (temp_root / "logs" / "jarvis.log").write_text(
+                "2026-04-05 15:03:00 [INFO] telegram.ext.Application: Application started"
+            )
+            create_memory_db(temp_root / "data" / "jarvis_memory.db")
+            module = load_module("tested_dashboard_runtime_info", "dashboard/app.py")
+            configure_dashboard_module(module, temp_root)
+            module._RUNTIME_COMMIT = "abc123"
+            module._repo_commit_cache["value"] = ""
+            module._repo_commit_cache["fetched_at"] = 0.0
+
+            with mock.patch.object(module, "_resolve_git_commit", return_value="def456"):
+                info = module._dashboard_runtime_info()
+
+        self.assertEqual(info["runtimeCommit"], "abc123")
+        self.assertEqual(info["repoCommit"], "def456")
+        self.assertTrue(info["runtimeStale"])
+
+    def test_dashboard_shell_polls_runtime_version_and_renders_warning_banner(self):
+        with TemporaryDirectory() as td:
+            temp_root = Path(td)
+            (temp_root / "logs").mkdir()
+            (temp_root / "data").mkdir()
+            (temp_root / "logs" / "jarvis.log").write_text(
+                "2026-04-05 15:03:00 [INFO] telegram.ext.Application: Application started"
+            )
+            create_memory_db(temp_root / "data" / "jarvis_memory.db")
+            module = load_module("tested_dashboard_runtime_shell", "dashboard/app.py")
+            configure_dashboard_module(module, temp_root)
+            snapshot = module.collect_snapshot()
+
+            with mock.patch.object(
+                module,
+                "_dashboard_runtime_info",
+                return_value={
+                    "serverStartedAt": "2026-04-09T22:00:00+00:00",
+                    "runtimeCommit": "abc123",
+                    "repoCommit": "def456",
+                    "runtimeStale": True,
+                },
+            ):
+                html = module._render_snapshot(snapshot)
+
+        self.assertIn('id="runtime-banner"', html)
+        self.assertIn("Dashboard process is stale.", html)
+        self.assertIn("/api/version", html)
+        self.assertIn("refreshRuntimeInfo()", html)
+        self.assertIn("applyRuntimeInfo(initialRuntimeInfo);", html)
+
     def test_memory_tab_renders_active_memories(self):
         with TemporaryDirectory() as td:
             temp_root = Path(td)

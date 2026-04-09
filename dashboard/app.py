@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import sqlite3
+import subprocess
 from collections import Counter
 from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta, timezone
@@ -46,6 +47,9 @@ OPS_AUDIT_PATH = DEFAULT_OPS_AUDIT_PATH
 logger = logging.getLogger(__name__)
 _DRIVE_CACHE_TTL_SECONDS = 60.0
 _drive_snapshot_cache: dict[str, Any] = {"fetched_at": 0.0, "payload": None}
+_REPO_COMMIT_CACHE_TTL_SECONDS = 5.0
+_repo_commit_cache: dict[str, Any] = {"fetched_at": 0.0, "value": ""}
+_SERVER_STARTED_AT = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 _PROCESSING_RE = re.compile(
     r"^(?P<ts>\S+ \S+) \[INFO\] __main__: Processing email: from=(?P<sender>.+?) subject=(?P<subject>.+?) attachments=(?P<attachments>\d+)$"
@@ -59,6 +63,48 @@ _NO_ATTACHMENTS_RE = re.compile(
 _FILED_RE = re.compile(
     r"^(?P<ts>\S+ \S+) \[INFO\] __main__: Filed attachment '(?P<filename>.+?)' -> (?P<top_level>.+?)/(?P<sub_folder>.+?) \(Drive ID: (?P<drive_id>.+?)\)$"
 )
+
+
+def _resolve_git_commit(repo_root: Path | None = None) -> str:
+    root = repo_root or ROOT
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "--short=12", "HEAD"],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            timeout=1.5,
+            check=True,
+        )
+    except Exception:
+        return ""
+    return completed.stdout.strip()
+
+
+_RUNTIME_COMMIT = _resolve_git_commit(ROOT)
+
+
+def _current_repo_commit() -> str:
+    now = monotonic()
+    cached_value = str(_repo_commit_cache.get("value", ""))
+    fetched_at = float(_repo_commit_cache.get("fetched_at", 0.0))
+    if cached_value and (now - fetched_at) < _REPO_COMMIT_CACHE_TTL_SECONDS:
+        return cached_value
+    current = _resolve_git_commit(ROOT)
+    _repo_commit_cache["value"] = current
+    _repo_commit_cache["fetched_at"] = now
+    return current
+
+
+def _dashboard_runtime_info() -> dict[str, Any]:
+    repo_commit = _current_repo_commit()
+    runtime_commit = _RUNTIME_COMMIT
+    return {
+        "serverStartedAt": _SERVER_STARTED_AT,
+        "runtimeCommit": runtime_commit,
+        "repoCommit": repo_commit,
+        "runtimeStale": bool(runtime_commit and repo_commit and runtime_commit != repo_commit),
+    }
 
 
 @dataclass
@@ -2562,6 +2608,18 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
     initial_summary = _render_summary_panel(snapshot)
     initial_tab_content = _render_tab_content(snapshot, active_tab)
     logo_svg = _load_dashboard_logo_svg()
+    runtime_info = _dashboard_runtime_info()
+    runtime_summary_parts = [f"Updated {snapshot.generated_at}"]
+    if runtime_info.get("runtimeCommit"):
+        runtime_summary_parts.append(f"Runtime {runtime_info['runtimeCommit']}")
+    if runtime_info.get("repoCommit"):
+        runtime_summary_parts.append(f"Repo {runtime_info['repoCommit']}")
+    runtime_summary_parts.append("Docs")
+    runtime_warning = (
+        f"Dashboard process is stale. Runtime {runtime_info['runtimeCommit']} is older than repo {runtime_info['repoCommit']}. Restart the dashboard to load the latest code."
+        if runtime_info.get("runtimeStale")
+        else ""
+    )
 
     return f"""<!doctype html>
 <html lang=\"en\">
@@ -2823,6 +2881,24 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
       margin-top: 4px;
       word-break: break-word;
     }}
+    .header-meta {{
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 10px;
+      text-align: right;
+    }}
+    .runtime-banner {{
+      display: block;
+      border: 1px solid rgba(255, 191, 71, 0.35);
+      background: rgba(255, 191, 71, 0.08);
+      color: #ffbf47;
+      padding: 10px 12px;
+      margin-bottom: 16px;
+    }}
+    .runtime-banner[hidden] {{
+      display: none;
+    }}
     @media (max-width: 1100px) {{
       .wrap {{
         padding: 20px;
@@ -2837,6 +2913,10 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
       header {{
         align-items: flex-start;
         flex-direction: column;
+      }}
+      .header-meta {{
+        align-items: flex-start;
+        text-align: left;
       }}
       .wrap {{
         padding: 16px;
@@ -2856,8 +2936,11 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
           <h1>Marvis Dashboard</h1>
         </div>
       </div>
-      <div class=\"subtle\"><a href=\"/docs\">Docs</a> · Updated {html.escape(snapshot.generated_at)}</div>
+      <div class=\"header-meta\">
+        <div class=\"subtle\" id=\"runtime-meta\">{html.escape(" · ".join(runtime_summary_parts[:-1]))} · <a href=\"/docs\">{html.escape(runtime_summary_parts[-1])}</a></div>
+      </div>
     </header>
+    <div class=\"runtime-banner\" id=\"runtime-banner\"{' hidden' if not runtime_warning else ''}>{html.escape(runtime_warning)}</div>
     <nav class=\"nav\">
       {_tab_nav(active_tab)}
     </nav>
@@ -2879,11 +2962,16 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
       const tabContent = document.getElementById("tab-content");
       const cache = new Map();
       const initialTab = {json.dumps(active_tab)};
+      const initialRuntimeInfo = {json.dumps(runtime_info)};
       let activeTab = initialTab;
       let summaryRequest = null;
       let currentTabRequest = null;
       let currentTabIntervalId = null;
+      let versionCheckRequest = null;
       const pendingControllers = new Set();
+      const runtimeState = {{
+        info: initialRuntimeInfo,
+      }};
       const linkedinState = {{
         selectedDraftId: null,
         mode: "preview",
@@ -2900,6 +2988,14 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
 
       function fragmentUrl(path) {{
         return new URL(path, window.location.href).toString();
+      }}
+
+      function runtimeMetaElement() {{
+        return document.getElementById("runtime-meta");
+      }}
+
+      function runtimeBannerElement() {{
+        return document.getElementById("runtime-banner");
       }}
 
       function trackController(controller) {{
@@ -2985,6 +3081,78 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
           throw new Error(payload.error || ("Request failed: " + response.status));
         }}
         return payload;
+      }}
+
+      function formatRuntimeMeta(info) {{
+        const parts = [];
+        if (info.serverStartedAt) {{
+          parts.push("Updated " + String(info.serverStartedAt));
+        }}
+        if (info.runtimeCommit) {{
+          parts.push("Runtime " + String(info.runtimeCommit));
+        }}
+        if (info.repoCommit) {{
+          parts.push("Repo " + String(info.repoCommit));
+        }}
+        return parts.join(" · ");
+      }}
+
+      function runtimeWarningMessage(info) {{
+        if (!info || !info.runtimeStale) {{
+          return "";
+        }}
+        return "Dashboard process is stale. Runtime " + String(info.runtimeCommit || "unknown") + " is older than repo " + String(info.repoCommit || "unknown") + ". Restart the dashboard to load the latest code.";
+      }}
+
+      function applyRuntimeInfo(info) {{
+        runtimeState.info = info || {{}};
+        const meta = runtimeMetaElement();
+        const banner = runtimeBannerElement();
+        if (meta) {{
+          const docsLink = '<a href="/docs">Docs</a>';
+          const metaText = formatRuntimeMeta(runtimeState.info);
+          meta.innerHTML = metaText ? escapeHtml(metaText) + " · " + docsLink : docsLink;
+        }}
+        if (banner) {{
+          const warning = runtimeWarningMessage(runtimeState.info);
+          banner.textContent = warning;
+          banner.hidden = !warning;
+        }}
+      }}
+
+      async function refreshRuntimeInfo(options = {{}}) {{
+        if (document.visibilityState !== "visible" || versionCheckRequest) {{
+          return versionCheckRequest;
+        }}
+        const forceRefresh = Boolean(options.forceRefresh);
+        const controller = trackController(new AbortController());
+        versionCheckRequest = (async () => {{
+          try {{
+            const info = await fetchJson("/api/version", {{ signal: controller.signal }});
+            const previous = runtimeState.info || {{}};
+            const serverChanged =
+              previous.serverStartedAt !== info.serverStartedAt ||
+              previous.runtimeCommit !== info.runtimeCommit;
+            const repoChanged = previous.repoCommit !== info.repoCommit;
+            applyRuntimeInfo(info);
+            if ((serverChanged || repoChanged || forceRefresh) && !hasUnsavedLinkedInChanges()) {{
+              cache.clear();
+              linkedinState.detailCache.clear();
+              await refreshSummary();
+              await loadTab(activeTab, true);
+            }}
+          }} finally {{
+            untrackController(controller);
+            versionCheckRequest = null;
+          }}
+        }})();
+        try {{
+          await versionCheckRequest;
+        }} catch (error) {{
+          if (error.name !== "AbortError") {{
+            console.error(error);
+          }}
+        }}
       }}
 
       function linkedInRoot() {{
@@ -3724,6 +3892,7 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
           abortPendingRequests();
           return;
         }}
+        void refreshRuntimeInfo();
         void refreshSummary();
         void refreshCurrentTab();
       }});
@@ -3732,10 +3901,12 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
         if (document.visibilityState !== "visible") {{
           return;
         }}
+        void refreshRuntimeInfo();
         void refreshSummary();
       }}, 10000);
 
       scheduleCurrentTabRefresh();
+      applyRuntimeInfo(initialRuntimeInfo);
       hydrateActiveTab();
 
       window.addEventListener("unload", () => {{
@@ -3817,6 +3988,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/status":
             snapshot = _snapshot_for_tab(tab)
             body = _render_json(snapshot).encode("utf-8")
+            _write_response(self, body, "application/json; charset=utf-8")
+            return
+
+        if parsed.path == "/api/version":
+            body = json.dumps(_dashboard_runtime_info()).encode("utf-8")
             _write_response(self, body, "application/json; charset=utf-8")
             return
 
