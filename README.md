@@ -205,8 +205,6 @@ GOOGLE_TOKEN_PATH=token.json
 JARVIS_TIMEZONE=Europe/Berlin
 OBSIDIAN_VAULT_PATH=/absolute/path/to/your/Obsidian/vault
 OBSIDIAN_ROOT_FOLDER=.
-GOOGLE_KEEP_TASKS_ENABLED=false
-GOOGLE_KEEP_TASKS_NOTE_TITLE=Marvis Tasks
 
 # Optional lower-risk Gemma routing:
 # OPENROUTER_MODEL_RELEVANCE=google/gemma-4-31b-it
@@ -216,11 +214,9 @@ GOOGLE_KEEP_TASKS_NOTE_TITLE=Marvis Tasks
 ### 3. Set up Google OAuth
 
 1. Open [Google Cloud Console](https://console.cloud.google.com/).
-2. Create a project and enable **Gmail API**, **Google Drive API**, **Google Calendar API**, and **Google Keep API**.
+2. Create a project and enable **Gmail API**, **Google Drive API**, and **Google Calendar API**.
 3. Create OAuth 2.0 desktop credentials and save them as `.credentials.json`.
 4. On first run, complete the consent flow in your browser. Marvis will create `token.json` automatically.
-
-If you enable Google Keep task sync on an existing setup, delete `token.json` once and re-authenticate so the new Keep scope is granted.
 
 ### 4. Run the app
 

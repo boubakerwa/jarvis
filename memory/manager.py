@@ -7,7 +7,7 @@ from typing import Optional
 import chromadb
 
 from config import settings
-from core.opslog import record_audit, record_issue
+from core.opslog import record_audit
 from memory.schema import MemoryCategory, MemoryRecord
 
 logger = logging.getLogger(__name__)
@@ -63,29 +63,8 @@ CREATE INDEX IF NOT EXISTS idx_memories_active ON memories(active);
 """
 
 
-def _build_task_sync():
-    if not getattr(settings, "GOOGLE_KEEP_TASKS_ENABLED", False):
-        return None
-
-    try:
-        from keep_api.client import GoogleKeepTaskSync
-
-        return GoogleKeepTaskSync(note_title=settings.GOOGLE_KEEP_TASKS_NOTE_TITLE)
-    except Exception as exc:
-        logger.warning("Google Keep task sync init failed: %s", exc)
-        record_issue(
-            level="ERROR",
-            event="keep_task_sync_init_failed",
-            component="keep",
-            status="error",
-            summary="Failed to initialise Google Keep task sync",
-            metadata={"error": str(exc)},
-        )
-        return None
-
-
 class MemoryManager:
-    def __init__(self, task_sync=None):
+    def __init__(self):
         os.makedirs(os.path.dirname(os.path.abspath(settings.JARVIS_DB_PATH)), exist_ok=True)
         self._db = sqlite3.connect(settings.JARVIS_DB_PATH, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
@@ -99,7 +78,6 @@ class MemoryManager:
             name="memories",
             metadata={"hnsw:space": "cosine"},
         )
-        self._task_sync = task_sync if task_sync is not None else _build_task_sync()
 
     # ------------------------------------------------------------------
     # Public API
@@ -199,9 +177,7 @@ class MemoryManager:
             summary="Created task",
             metadata={"due_date": due_date or ""},
         )
-        task = {"id": task_id, "description": description, "due_date": due_date, "status": "pending"}
-        self._sync_tasks_to_google_keep()
-        return task
+        return {"id": task_id, "description": description, "due_date": due_date, "status": "pending"}
 
     def list_tasks(self, status: str = "pending") -> list[dict]:
         if status == "all":
@@ -229,16 +205,7 @@ class MemoryManager:
                 summary="Completed task",
                 metadata={"task_id": task_id},
             )
-            self._sync_tasks_to_google_keep()
         return cursor.rowcount > 0
-
-    def _sync_tasks_to_google_keep(self) -> None:
-        if not self._task_sync:
-            return
-        try:
-            self._task_sync.sync(self.list_tasks("all"))
-        except Exception as exc:
-            logger.warning("Google Keep task sync failed: %s", exc)
 
     # ------------------------------------------------------------------
     # Financial records
