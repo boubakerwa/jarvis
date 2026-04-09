@@ -64,7 +64,16 @@ class TelegramProactiveNotifier:
         try:
             chunks = _split_message(message, self._max_message_length)
             for chunk in chunks:
-                asyncio.run(self._bot.send_message(chat_id=self._chat_id, text=chunk))
+                # asyncio.run() creates a brand-new event loop each call, which is
+                # safe to use from any background thread regardless of what the main
+                # thread's loop is doing (or whether it has been closed).
+                loop = asyncio.new_event_loop()
+                try:
+                    loop.run_until_complete(
+                        self._bot.send_message(chat_id=self._chat_id, text=chunk)
+                    )
+                finally:
+                    loop.close()
             record_activity(
                 event="telegram_proactive_message_sent",
                 component="telegram",
@@ -285,16 +294,18 @@ class TelegramBot:
         if not args_text or args_text.strip().lower() == "help":
             help_text = (
                 "*LinkedIn Composer*\n\n"
-                "Queue a draft \\(processed within 15 min\\):\n"
+                "Queue a draft (processed within 15 min):\n"
                 "  `/linkedin <text>`\n\n"
+                "From an X/Twitter post — just paste the URL:\n"
+                "  `/linkedin https://x.com/user/status/123`\n\n"
                 "Set voice:\n"
                 "  `/linkedin voice=operator <text>`\n"
-                "  Voices: professional \\(default\\), operator, founder\n\n"
+                "  Voices: professional (default), operator, founder\n\n"
                 "Attribute a source:\n"
                 "  `/linkedin author=@handle <text>`\n\n"
                 "Rewrite a ready draft:\n"
-                "  `/linkedin rewrite <draft\\_id> <preset or instructions>`\n"
-                "  Presets: builder\\-voice, stronger\\-hook, shorter\\-post, operator\\-lesson, more\\-opinionated\n\n"
+                "  `/linkedin rewrite <draft_id> <preset or instructions>`\n"
+                "  Presets: builder-voice, stronger-hook, shorter-post, operator-lesson, more-opinionated\n\n"
                 "List drafts:\n"
                 "  `/linkedin list` — all recent\n"
                 "  `/linkedin list pending` — queued only\n"
@@ -303,7 +314,7 @@ class TelegramBot:
                 "  `/linkedin process`\n\n"
                 "_Drafts live in Drive: Jarvis/PR/LinkedIn Composer/_"
             )
-            await update.message.reply_text(help_text, parse_mode="MarkdownV2")
+            await update.message.reply_text(help_text, parse_mode="Markdown")
             return
 
         if args_text.strip().lower() == "process":
@@ -347,10 +358,20 @@ class TelegramBot:
             author = author_match.group(1)
             remaining = remaining.replace(author_match.group(0), "").strip()
 
-        source_text = remaining.strip()
-        if not source_text:
-            await update.message.reply_text("Please provide source text after /linkedin")
+        source_input = remaining.strip()
+        if not source_input:
+            await update.message.reply_text("Please provide source text or an X post URL after /linkedin")
             return
+
+        # Detect a bare X/Twitter URL — fetch tweet content automatically.
+        # Any other URL or plain text is treated as manual source text.
+        _URL_RE = re.compile(r"^https?://\S+$", re.IGNORECASE)
+        source_text = ""
+        source_url = ""
+        if _URL_RE.match(source_input):
+            source_url = source_input
+        else:
+            source_text = source_input
 
         op_id = new_op_id("linkedin-queue")
         with operation_context(op_id):
@@ -366,6 +387,7 @@ class TelegramBot:
                 payload = build_enqueue_payload(
                     text=source_text,
                     author=author,
+                    source_url=source_url,
                     voice=voice,
                     origin="telegram",
                 )
