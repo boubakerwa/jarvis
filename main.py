@@ -83,6 +83,41 @@ def _format_email_summary_message(email, result: EmailProcessingResult) -> str:
     return "\n".join(lines)
 
 
+def _format_batch_summary(results: list[tuple]) -> str:
+    """Build a single aggregated Telegram message for a poll-cycle batch of emails."""
+    if not results:
+        return ""
+
+    counts: dict[str, int] = {}
+    lines = [f"[Gmail] {len(results)} email(s) processed"]
+
+    for email, result, exc in results:
+        subject = _trim(email.subject or "(no subject)", 80)
+        sender = _trim(email.sender or "(unknown)", 60)
+
+        if exc is not None:
+            outcome_label = "error"
+            detail = _trim(str(exc), 100)
+        else:
+            outcome_label = result.outcome
+            detail = None
+
+        counts[outcome_label] = counts.get(outcome_label, 0) + 1
+
+        icon = {"filed": "✅", "partial": "⚠️", "skipped": "⏭", "no_attachments": "📭", "failed": "❌", "error": "🔴"}.get(outcome_label, "•")
+        line = f"{icon} {subject} — {sender}"
+        if detail:
+            line += f"\n   ↳ {detail}"
+        elif result and result.reason and outcome_label in ("skipped", "no_attachments"):
+            line += f"\n   ↳ {_trim(result.reason, 100)}"
+        lines.append(line)
+
+    summary_parts = [f"{v} {k}" for k, v in counts.items()]
+    lines.insert(1, "(" + ", ".join(summary_parts) + ")")
+
+    return "\n".join(lines)
+
+
 def _format_email_failure_message(email, error: Exception) -> str:
     lines = [
         "[Gmail] Email processing error",
@@ -450,18 +485,42 @@ def main():
         summary="LinkedIn processor cron started (15 min interval)",
     )
 
+    # Morning digest (daily scheduled message)
+    if settings.JARVIS_MORNING_DIGEST_ENABLED:
+        from morning_digest import MorningDigestRunner
+        morning_runner = MorningDigestRunner(notifier=proactive_notifier)
+        morning_thread = threading.Thread(
+            target=morning_runner.run_forever, daemon=True, name="morning-digest"
+        )
+        morning_thread.start()
+        record_activity(
+            event="morning_digest_started",
+            component="morning_digest",
+            summary=f"Morning digest scheduled for {settings.JARVIS_MORNING_TIME} local time",
+        )
+    else:
+        logger.info("Morning digest disabled (set JARVIS_MORNING_DIGEST_ENABLED=true to enable)")
+
     # Gmail watcher (background thread)
     from gmail.watcher import GmailWatcher
+
+    # Per-email: process and stash result; no Telegram message yet.
+    _email_results: list[tuple] = []  # (email, result | None, exc | None)
 
     def email_callback(email):
         try:
             result = _handle_email(email, memory_manager, drive_client)
-            proactive_notifier.send_message(_format_email_summary_message(email, result))
+            _email_results.append((email, result, None))
         except Exception as exc:
-            proactive_notifier.send_message(_format_email_failure_message(email, exc))
+            _email_results.append((email, None, exc))
             raise
 
-    watcher = GmailWatcher(on_email=email_callback)
+    # Batch: send one aggregated summary after all emails in the poll cycle are processed.
+    def batch_callback(emails):
+        results = _email_results[-len(emails):]  # grab the matching tail
+        proactive_notifier.send_message(_format_batch_summary(results))
+
+    watcher = GmailWatcher(on_email=email_callback, on_batch=batch_callback)
     gmail_thread = threading.Thread(target=watcher.run_forever, daemon=True, name="gmail-watcher")
     gmail_thread.start()
     logger.info("Gmail watcher started in background thread")
