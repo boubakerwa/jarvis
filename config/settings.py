@@ -63,6 +63,10 @@ JARVIS_DB_PATH: str = os.getenv("JARVIS_DB_PATH", "./data/jarvis_memory.db")
 JARVIS_CHROMA_PATH: str = os.getenv("JARVIS_CHROMA_PATH", "./data/jarvis_chroma")
 OBSIDIAN_VAULT_PATH: str = os.getenv("OBSIDIAN_VAULT_PATH", "").strip()
 OBSIDIAN_ROOT_FOLDER: str = os.getenv("OBSIDIAN_ROOT_FOLDER", "Marvis").strip()
+GOOGLE_KEEP_TASKS_ENABLED: bool = _env_bool("GOOGLE_KEEP_TASKS_ENABLED", False)
+GOOGLE_KEEP_TASKS_NOTE_TITLE: str = (
+    os.getenv("GOOGLE_KEEP_TASKS_NOTE_TITLE", "Marvis Tasks").strip() or "Marvis Tasks"
+)
 JARVIS_MORNING_DIGEST_ENABLED: bool = _env_bool("JARVIS_MORNING_DIGEST_ENABLED", True)
 JARVIS_MORNING_TIME: str = os.getenv("JARVIS_MORNING_TIME", "09:00").strip()
 
@@ -75,6 +79,7 @@ GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/calendar",
+    "https://www.googleapis.com/auth/keep",
 ]
 
 # Conversation history cap

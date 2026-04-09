@@ -58,6 +58,26 @@ class FakeProactiveBot:
             raise RuntimeError("network error")
 
 
+class FakeManagedProactiveBot:
+    instances = []
+
+    def __init__(self, token):
+        self.token = token
+        self.calls = []
+        self.events = []
+        type(self).instances.append(self)
+
+    async def __aenter__(self):
+        self.events.append("enter")
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        self.events.append("exit")
+
+    async def send_message(self, chat_id, text):
+        self.calls.append((chat_id, text))
+
+
 class TelegramBotTests(unittest.TestCase):
     def test_publish_bot_commands_registers_default_and_chat_scope(self):
         module = load_module("tested_telegram_bot", "telegram_bot/bot.py")
@@ -68,7 +88,7 @@ class TelegramBotTests(unittest.TestCase):
 
         self.assertEqual(len(app.bot.calls), 2)
         command_names = [command.command for command in app.bot.calls[0][0]]
-        self.assertEqual(command_names, ["status", "llmops", "memories", "forget", "reset"])
+        self.assertEqual(command_names, ["status", "llmops", "memories", "forget", "reset", "linkedin"])
         self.assertIsNone(app.bot.calls[0][1])
         self.assertEqual(
             app.bot.calls[1][1].chat_id,
@@ -185,6 +205,26 @@ class TelegramBotTests(unittest.TestCase):
         self.assertFalse(sent)
         self.assertEqual(fake_bot.calls, [(12345, "Attempt")])
         issue_mock.assert_called_once()
+
+    def test_proactive_notifier_uses_short_lived_bot_session_when_not_injected(self):
+        module = load_module("tested_telegram_bot_proactive_session", "telegram_bot/bot.py")
+        FakeManagedProactiveBot.instances = []
+        notifier = module.TelegramProactiveNotifier(
+            enabled=True,
+            bot_token="token-123",
+            chat_id=67890,
+            max_message_length=32,
+        )
+
+        with patch.object(module, "Bot", FakeManagedProactiveBot), patch.object(module, "record_activity"), patch.object(module, "record_issue"):
+            sent = notifier.send_message("Short lived session")
+
+        self.assertTrue(sent)
+        self.assertEqual(len(FakeManagedProactiveBot.instances), 1)
+        instance = FakeManagedProactiveBot.instances[0]
+        self.assertEqual(instance.token, "token-123")
+        self.assertEqual(instance.events, ["enter", "exit"])
+        self.assertEqual(instance.calls, [(67890, "Short lived session")])
 
 
 if __name__ == "__main__":

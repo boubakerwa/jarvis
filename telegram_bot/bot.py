@@ -53,7 +53,8 @@ class TelegramProactiveNotifier:
     ):
         self._enabled = enabled
         self._chat_id = chat_id or settings.TELEGRAM_ALLOWED_USER_ID
-        self._bot = bot or Bot(token=bot_token or settings.TELEGRAM_BOT_TOKEN)
+        self._bot_token = bot_token or settings.TELEGRAM_BOT_TOKEN
+        self._bot = bot
         self._max_message_length = max(1, max_message_length)
 
     def send_message(self, text: str) -> bool:
@@ -63,17 +64,7 @@ class TelegramProactiveNotifier:
 
         try:
             chunks = _split_message(message, self._max_message_length)
-            for chunk in chunks:
-                # asyncio.run() creates a brand-new event loop each call, which is
-                # safe to use from any background thread regardless of what the main
-                # thread's loop is doing (or whether it has been closed).
-                loop = asyncio.new_event_loop()
-                try:
-                    loop.run_until_complete(
-                        self._bot.send_message(chat_id=self._chat_id, text=chunk)
-                    )
-                finally:
-                    loop.close()
+            asyncio.run(self._send_chunks(chunks))
             record_activity(
                 event="telegram_proactive_message_sent",
                 component="telegram",
@@ -92,6 +83,18 @@ class TelegramProactiveNotifier:
                 metadata={"error": str(exc)},
             )
             return False
+
+    async def _send_chunks(self, chunks: list[str]) -> None:
+        if self._bot is not None:
+            for chunk in chunks:
+                await self._bot.send_message(chat_id=self._chat_id, text=chunk)
+            return
+
+        # Create a short-lived bot session per proactive send so the underlying
+        # HTTP client is initialized and shut down within the same event loop.
+        async with Bot(token=self._bot_token) as bot:
+            for chunk in chunks:
+                await bot.send_message(chat_id=self._chat_id, text=chunk)
 
 
 class TelegramBot:
