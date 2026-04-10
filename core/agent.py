@@ -1,12 +1,16 @@
 import logging
+from json import dumps as json_dumps
 from datetime import datetime, timezone
 from time import monotonic
 from typing import Optional
 
 from config import settings
+from github_issues import GitHubAPIError, GitHubConfigError, GitHubIssuesClient, GitHubTokenMissingError, load_github_client_config
+from core.log_reader import read_logs as query_logs
 from core.llmops import record_llm_call
 from core.llm_client import call_with_free_model_retry, create_llm_client, get_model_name
 from core.prompts import build_system_prompt
+from core.source_reader import read_source_file as read_project_source_file
 from core.time_utils import (
     contains_explicit_date,
     day_bounds_for_calendar,
@@ -22,6 +26,195 @@ logger = logging.getLogger(__name__)
 
 # Tool definitions passed to the model
 TOOLS: list[dict] = [
+    {
+        "name": "create_github_issue",
+        "description": (
+            "Create a GitHub issue in the configured repository. "
+            "Use this for feature requests, backlog items, implementation prompts, and bug reports that should be tracked in GitHub instead of notes."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Issue title.",
+                },
+                "body": {
+                    "type": "string",
+                    "description": "Optional issue body with details, acceptance criteria, or context.",
+                },
+                "labels": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional GitHub labels like 'feature', 'bug', or 'ops'.",
+                },
+            },
+            "required": ["title"],
+        },
+    },
+    {
+        "name": "list_pull_requests",
+        "description": "List pull requests from the configured GitHub repository. Read-only.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "state": {
+                    "type": "string",
+                    "enum": ["open", "closed", "all"],
+                    "default": "open",
+                },
+                "limit": {
+                    "type": "integer",
+                    "default": 5,
+                    "description": "Maximum number of pull requests to return.",
+                },
+            },
+        },
+    },
+    {
+        "name": "read_pull_request",
+        "description": "Read a pull request from the configured GitHub repository by number. Read-only.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "number": {"type": "integer", "description": "Pull request number."},
+            },
+            "required": ["number"],
+        },
+    },
+    {
+        "name": "list_commits",
+        "description": "List recent commits from the configured GitHub repository. Read-only.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "branch": {
+                    "type": "string",
+                    "description": "Optional branch name. Defaults to the repository default branch.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "default": 5,
+                    "description": "Maximum number of commits to return.",
+                },
+            },
+        },
+    },
+    {
+        "name": "read_commit",
+        "description": "Read a commit from the configured GitHub repository by SHA. Read-only.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sha": {"type": "string", "description": "Commit SHA or unique prefix."},
+            },
+            "required": ["sha"],
+        },
+    },
+    {
+        "name": "read_source_file",
+        "description": (
+            "Read a source or project file from the Marvis codebase. "
+            "This is strictly read-only and sandboxed to the project root."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Project-relative file path like 'core/agent.py' or an absolute path inside the Marvis project root.",
+                },
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "read_logs",
+        "description": (
+            "Read structured operational logs from Marvis's local JSONL log files. "
+            "Supports filtering by local-date expression, log level, and result count. "
+            "This is strictly read-only."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "date_expression": {
+                    "type": "string",
+                    "description": "Optional local date like 'today', 'yesterday', 'monday', or '2026-04-10'.",
+                },
+                "level": {
+                    "type": "string",
+                    "enum": ["INFO", "WARNING", "ERROR", "ALL"],
+                    "description": "Optional log level filter.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "default": 20,
+                    "description": "Maximum number of log entries to return.",
+                },
+            },
+        },
+    },
+    {
+        "name": "schedule_message",
+        "description": (
+            "Schedule a proactive Telegram message for Wess. "
+            "Use this for explicit reminder requests like 'remind me', 'ping me later', or 'follow up in 2 hours'. "
+            "You may also set recurrence for repeating reminders."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string",
+                    "description": "The exact message Jarvis should send to Wess later via Telegram.",
+                },
+                "when": {
+                    "type": "string",
+                    "description": "When to send it. Accepts ISO datetimes or natural language like 'today at 3pm' or 'in 2 hours'.",
+                },
+                "recurrence": {
+                    "type": "string",
+                    "description": "Optional repeat rule such as 'daily', 'weekly', 'every 2 hours', or 'weekdays'.",
+                },
+                "task_id": {
+                    "type": "string",
+                    "description": "Optional linked task ID. Useful for repeated reminders tied to a task.",
+                },
+                "until_task_done": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "When true, stop sending this reminder after the linked task is marked done.",
+                },
+            },
+            "required": ["message", "when"],
+        },
+    },
+    {
+        "name": "list_reminders",
+        "description": "List scheduled Telegram reminders so you can review what is queued.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": ["scheduled", "cancelled", "completed", "all"],
+                    "default": "scheduled",
+                },
+            },
+        },
+    },
+    {
+        "name": "cancel_reminder",
+        "description": "Cancel a scheduled reminder by ID. Accepts the full ID or the short 8-character prefix from list_reminders.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "reminder_id": {"type": "string", "description": "Reminder ID from list_reminders."},
+            },
+            "required": ["reminder_id"],
+        },
+    },
     {
         "name": "remember",
         "description": (
@@ -284,8 +477,9 @@ TOOLS: list[dict] = [
     {
         "name": "create_task",
         "description": (
-            "Create a task or reminder. "
-            "ONLY use when Wess explicitly asks — e.g. 'remind me to...', 'add to my todo', 'create a task'. "
+            "Create a task or todo item in Jarvis's task list. "
+            "This does not send Telegram automatically. "
+            "ONLY use when Wess explicitly asks — e.g. 'add to my todo' or 'create a task'. "
             "Never create tasks proactively."
         ),
         "input_schema": {
@@ -352,12 +546,13 @@ TOOLS: list[dict] = [
 
 
 class JarvisAgent:
-    def __init__(self, memory_manager: MemoryManager, drive_client=None, calendar_client=None, notes_manager=None):
+    def __init__(self, memory_manager: MemoryManager, drive_client=None, calendar_client=None, notes_manager=None, reminder_manager=None):
         self._client = create_llm_client()
         self._memory = memory_manager
         self._drive = drive_client
         self._calendar = calendar_client
         self._notes = notes_manager
+        self._reminders = reminder_manager
         self._history: list[dict] = []
         self._current_user_message = ""
 
@@ -453,7 +648,27 @@ class JarvisAgent:
 
     def _execute_tool(self, name: str, inputs: dict) -> str:
         try:
-            if name == "remember":
+            if name == "create_github_issue":
+                return self._tool_create_github_issue(inputs)
+            elif name == "list_pull_requests":
+                return self._tool_list_pull_requests(inputs)
+            elif name == "read_pull_request":
+                return self._tool_read_pull_request(inputs)
+            elif name == "list_commits":
+                return self._tool_list_commits(inputs)
+            elif name == "read_commit":
+                return self._tool_read_commit(inputs)
+            elif name == "read_source_file":
+                return self._tool_read_source_file(inputs)
+            elif name == "read_logs":
+                return self._tool_read_logs(inputs)
+            elif name == "schedule_message":
+                return self._tool_schedule_message(inputs)
+            elif name == "list_reminders":
+                return self._tool_list_reminders(inputs)
+            elif name == "cancel_reminder":
+                return self._tool_cancel_reminder(inputs)
+            elif name == "remember":
                 return self._tool_remember(inputs)
             elif name == "recall":
                 return self._tool_recall(inputs)
@@ -504,6 +719,219 @@ class JarvisAgent:
     # ------------------------------------------------------------------
     # Tool implementations
     # ------------------------------------------------------------------
+
+    def _github_client(self) -> GitHubIssuesClient:
+        config = load_github_client_config()
+        return GitHubIssuesClient(config)
+
+    def _tool_create_github_issue(self, inputs: dict) -> str:
+        try:
+            client = self._github_client()
+            issue = client.create_issue(
+                title=inputs["title"],
+                body=inputs.get("body"),
+                labels=tuple(inputs.get("labels", [])) or None,
+            )
+        except (GitHubConfigError, GitHubAPIError, GitHubTokenMissingError) as e:
+            return f"Could not create GitHub issue: {e}"
+
+        labels_text = ""
+        if issue.labels:
+            labels_text = f" [labels: {', '.join(issue.labels)}]"
+        return f"Created GitHub issue #{issue.number}: {issue.title}{labels_text}\n{issue.url}"
+
+    def _tool_list_pull_requests(self, inputs: dict) -> str:
+        try:
+            client = self._github_client()
+            prs = client.list_pull_requests(
+                state=inputs.get("state", "open"),
+                limit=inputs.get("limit", 5),
+            )
+        except (GitHubConfigError, GitHubAPIError) as e:
+            return f"Could not read pull requests: {e}"
+
+        if not prs:
+            return "No pull requests found."
+
+        lines = []
+        for pr in prs:
+            line = f"- PR #{pr.number} [{pr.state}] {pr.title}"
+            if pr.author:
+                line += f" by {pr.author}"
+            if pr.base_branch and pr.head_branch:
+                line += f" ({pr.head_branch} -> {pr.base_branch})"
+            if pr.updated_at:
+                line += f"\n  Updated: {pr.updated_at}"
+            if pr.url:
+                line += f"\n  {pr.url}"
+            lines.append(line)
+        return "\n".join(lines)
+
+    def _tool_read_pull_request(self, inputs: dict) -> str:
+        try:
+            client = self._github_client()
+            pr = client.get_pull_request(int(inputs["number"]))
+        except (GitHubConfigError, GitHubAPIError, ValueError) as e:
+            return f"Could not read pull request: {e}"
+
+        lines = [
+            f"PR #{pr.number}: {pr.title}",
+            f"State: {pr.state}",
+        ]
+        if pr.author:
+            lines.append(f"Author: {pr.author}")
+        if pr.base_branch or pr.head_branch:
+            lines.append(f"Branches: {pr.head_branch or '?'} -> {pr.base_branch or '?'}")
+        if pr.updated_at:
+            lines.append(f"Updated: {pr.updated_at}")
+        lines.append(
+            f"Diff stats: {pr.additions} additions, {pr.deletions} deletions, {pr.changed_files} files, {pr.commit_count} commits"
+        )
+        if pr.body:
+            lines.append("")
+            lines.append("Body:")
+            lines.append(pr.body[:4000])
+        if pr.url:
+            lines.append("")
+            lines.append(pr.url)
+        return "\n".join(lines)
+
+    def _tool_list_commits(self, inputs: dict) -> str:
+        try:
+            client = self._github_client()
+            commits = client.list_commits(
+                branch=inputs.get("branch"),
+                limit=inputs.get("limit", 5),
+            )
+        except (GitHubConfigError, GitHubAPIError) as e:
+            return f"Could not read commits: {e}"
+
+        if not commits:
+            return "No commits found."
+
+        lines = []
+        for commit in commits:
+            headline = commit.message.splitlines()[0] if commit.message else "(no message)"
+            line = f"- {commit.short_sha} {headline}"
+            if commit.author:
+                line += f" by {commit.author}"
+            if commit.committed_at:
+                line += f"\n  Committed: {commit.committed_at}"
+            if commit.url:
+                line += f"\n  {commit.url}"
+            lines.append(line)
+        return "\n".join(lines)
+
+    def _tool_read_commit(self, inputs: dict) -> str:
+        try:
+            client = self._github_client()
+            commit = client.get_commit(str(inputs["sha"]).strip())
+        except (GitHubConfigError, GitHubAPIError) as e:
+            return f"Could not read commit: {e}"
+
+        lines = [f"Commit {commit.short_sha}: {commit.message}"]
+        if commit.author:
+            lines.append(f"Author: {commit.author}")
+        if commit.committed_at:
+            lines.append(f"Committed: {commit.committed_at}")
+        lines.append(
+            f"Diff stats: {commit.additions} additions, {commit.deletions} deletions, {commit.changed_files} files"
+        )
+        if commit.files:
+            lines.append("Files:")
+            lines.extend(f"- {name}" for name in commit.files[:20])
+            if len(commit.files) > 20:
+                lines.append(f"- ... and {len(commit.files) - 20} more")
+        if commit.url:
+            lines.append("")
+            lines.append(commit.url)
+        return "\n".join(lines)
+
+    def _tool_read_source_file(self, inputs: dict) -> str:
+        try:
+            result = read_project_source_file(inputs["path"])
+        except (FileNotFoundError, ValueError) as e:
+            return f"Could not read source file: {e}"
+
+        suffix = ""
+        if result["truncated"]:
+            suffix = "\n\n[...truncated]"
+        return f"Contents of {result['path']}:\n\n{result['content']}{suffix}"
+
+    def _tool_read_logs(self, inputs: dict) -> str:
+        try:
+            records = query_logs(
+                date_expression=inputs.get("date_expression"),
+                level=inputs.get("level"),
+                limit=inputs.get("limit", 20),
+            )
+        except ValueError as e:
+            return f"Could not read logs: {e}"
+
+        if not records:
+            return "No log entries found."
+
+        lines = []
+        for record in records:
+            line = (
+                f"- {record['ts']} [{record['level']}] "
+                f"{record['component'] or 'runtime'}::{record['event'] or 'event'}"
+            )
+            if record.get("summary"):
+                line += f" — {record['summary']}"
+            details = []
+            if record.get("source"):
+                details.append(f"source={record['source']}")
+            if record.get("status"):
+                details.append(f"status={record['status']}")
+            if record.get("op_id"):
+                details.append(f"op_id={record['op_id']}")
+            if details:
+                line += f"\n  {' | '.join(details)}"
+            if record.get("metadata"):
+                line += f"\n  metadata={json_dumps(record['metadata'], ensure_ascii=False, sort_keys=True)}"
+            lines.append(line)
+        return "\n".join(lines)
+
+    def _tool_schedule_message(self, inputs: dict) -> str:
+        if not self._reminders:
+            return "Reminder manager not initialised."
+
+        try:
+            reminder = self._reminders.schedule_message(
+                inputs["message"],
+                inputs["when"],
+                recurrence=inputs.get("recurrence"),
+                task_id=inputs.get("task_id"),
+                until_task_done=inputs.get("until_task_done", False),
+                now=get_local_now(),
+            )
+        except ValueError as e:
+            return f"Could not schedule reminder: {e}"
+
+        short_id = reminder["id"][:8]
+        scheduled_for = self._reminders.describe_reminder(reminder)
+        return f"Reminder scheduled: {scheduled_for} (ID: {short_id})"
+
+    def _tool_list_reminders(self, inputs: dict) -> str:
+        if not self._reminders:
+            return "Reminder manager not initialised."
+        status = inputs.get("status", "scheduled")
+        reminders = self._reminders.list_reminders(status)
+        if not reminders:
+            return f"No {status} reminders." if status != "all" else "No reminders found."
+        return "\n".join(f"- {self._reminders.describe_reminder(reminder)}" for reminder in reminders)
+
+    def _tool_cancel_reminder(self, inputs: dict) -> str:
+        if not self._reminders:
+            return "Reminder manager not initialised."
+        try:
+            reminder = self._reminders.cancel_reminder(inputs["reminder_id"], now=get_local_now())
+        except ValueError as e:
+            return f"Could not cancel reminder: {e}"
+        if reminder is None:
+            return f"No scheduled reminder found with ID starting with '{inputs['reminder_id']}'."
+        return f"Reminder cancelled: {self._reminders.describe_reminder(reminder)}"
 
     def _tool_remember(self, inputs: dict) -> str:
         record = MemoryRecord(

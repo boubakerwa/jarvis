@@ -71,6 +71,7 @@ class AgentLoopTests(unittest.TestCase):
         create_mock = Mock(side_effect=[response1, response2])
         fake_client = types.SimpleNamespace(messages=types.SimpleNamespace(create=create_mock))
         fake_llm_client = types.ModuleType("core.llm_client")
+        fake_llm_client.call_with_free_model_retry = lambda fn, _model_name: fn()
         fake_llm_client.create_llm_client = Mock(return_value=fake_client)
         fake_llm_client.get_model_name = Mock(return_value="anthropic/claude-sonnet-4.6")
 

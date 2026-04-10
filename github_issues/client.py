@@ -8,7 +8,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from github_issues.models import IssueSummary
+from github_issues.models import CommitSummary, IssueSummary, PullRequestSummary
 
 RequestJson = Callable[[str, str, dict[str, str], Optional[dict[str, Any]]], Any]
 
@@ -135,6 +135,53 @@ class GitHubIssuesClient:
             raise GitHubAPIError(status=0, message="Unexpected GitHub response format for issue update.")
         return self._to_issue_summary(payload)
 
+    def list_pull_requests(self, *, state: str = "open", limit: int = 5) -> list[PullRequestSummary]:
+        payload = self._request(
+            "GET",
+            f"/repos/{self._config.repository}/pulls",
+            query={"state": state, "per_page": str(max(1, min(limit, 50)))},
+            require_auth=False,
+        )
+        if not isinstance(payload, list):
+            raise GitHubAPIError(status=0, message="Unexpected GitHub response format for pull request list.")
+        items = [item for item in payload if isinstance(item, dict)]
+        return [self._to_pull_request_summary(item) for item in items]
+
+    def get_pull_request(self, number: int) -> PullRequestSummary:
+        payload = self._request(
+            "GET",
+            f"/repos/{self._config.repository}/pulls/{number}",
+            require_auth=False,
+        )
+        if not isinstance(payload, dict):
+            raise GitHubAPIError(status=0, message="Unexpected GitHub response format for pull request detail.")
+        return self._to_pull_request_summary(payload)
+
+    def list_commits(self, *, branch: str | None = None, limit: int = 5) -> list[CommitSummary]:
+        query = {"per_page": str(max(1, min(limit, 50)))}
+        if branch:
+            query["sha"] = branch
+        payload = self._request(
+            "GET",
+            f"/repos/{self._config.repository}/commits",
+            query=query,
+            require_auth=False,
+        )
+        if not isinstance(payload, list):
+            raise GitHubAPIError(status=0, message="Unexpected GitHub response format for commit list.")
+        items = [item for item in payload if isinstance(item, dict)]
+        return [self._to_commit_summary(item) for item in items]
+
+    def get_commit(self, sha: str) -> CommitSummary:
+        payload = self._request(
+            "GET",
+            f"/repos/{self._config.repository}/commits/{sha}",
+            require_auth=False,
+        )
+        if not isinstance(payload, dict):
+            raise GitHubAPIError(status=0, message="Unexpected GitHub response format for commit detail.")
+        return self._to_commit_summary(payload)
+
     def _request(
         self,
         method: str,
@@ -192,6 +239,59 @@ class GitHubIssuesClient:
             labels=tuple(labels),
             assignees=tuple(assignees),
             updated_at=str(payload.get("updated_at", "")).strip() or None,
+        )
+
+    def _to_pull_request_summary(self, payload: dict[str, Any]) -> PullRequestSummary:
+        user = payload.get("user") if isinstance(payload.get("user"), dict) else {}
+        base = payload.get("base") if isinstance(payload.get("base"), dict) else {}
+        head = payload.get("head") if isinstance(payload.get("head"), dict) else {}
+        base_ref = str(base.get("ref", "")).strip() or None
+        head_ref = str(head.get("ref", "")).strip() or None
+        author = str(user.get("login", "")).strip() or None
+        body = str(payload.get("body", "")).strip() or None
+
+        return PullRequestSummary(
+            number=int(payload.get("number", 0)),
+            title=str(payload.get("title", "")).strip(),
+            state=str(payload.get("state", "")).strip(),
+            url=str(payload.get("html_url", "")).strip(),
+            author=author,
+            base_branch=base_ref,
+            head_branch=head_ref,
+            updated_at=str(payload.get("updated_at", "")).strip() or None,
+            body=body,
+            additions=int(payload.get("additions", 0) or 0),
+            deletions=int(payload.get("deletions", 0) or 0),
+            changed_files=int(payload.get("changed_files", 0) or 0),
+            commit_count=int(payload.get("commits", 0) or 0),
+        )
+
+    def _to_commit_summary(self, payload: dict[str, Any]) -> CommitSummary:
+        commit_payload = payload.get("commit") if isinstance(payload.get("commit"), dict) else {}
+        author_payload = commit_payload.get("author") if isinstance(commit_payload.get("author"), dict) else {}
+        top_author = payload.get("author") if isinstance(payload.get("author"), dict) else {}
+        message = str(commit_payload.get("message", "")).strip()
+        files_payload = payload.get("files") if isinstance(payload.get("files"), list) else []
+        filenames = []
+        for item in files_payload:
+            if isinstance(item, dict):
+                name = str(item.get("filename", "")).strip()
+                if name:
+                    filenames.append(name)
+        stats_payload = payload.get("stats") if isinstance(payload.get("stats"), dict) else {}
+        sha = str(payload.get("sha", "")).strip()
+
+        return CommitSummary(
+            sha=sha,
+            short_sha=sha[:8],
+            message=message,
+            url=str(payload.get("html_url", "")).strip(),
+            author=str(top_author.get("login", "")).strip() or str(author_payload.get("name", "")).strip() or None,
+            committed_at=str(author_payload.get("date", "")).strip() or None,
+            additions=int(stats_payload.get("additions", payload.get("additions", 0)) or 0),
+            deletions=int(stats_payload.get("deletions", payload.get("deletions", 0)) or 0),
+            changed_files=int(len(filenames) or payload.get("files_changed", 0) or 0),
+            files=tuple(filenames),
         )
 
 

@@ -51,6 +51,10 @@ class ResolvedEventTime:
     all_day: bool
 
 
+def _normalize_whitespace(value: str) -> str:
+    return " ".join(value.strip().split())
+
+
 def get_local_timezone():
     tz_name = settings.JARVIS_TIMEZONE
     if tz_name:
@@ -147,13 +151,152 @@ def _extract_time(value: str) -> Optional[tuple[int, int]]:
             hour += 12
         return hour, 0
 
+    if re.search(r"\bnoon\b", lowered):
+        return 12, 0
+    if re.search(r"\bmidnight\b", lowered):
+        return 0, 0
+
     return None
 
 
 def _strip_time_expression(value: str) -> str:
     text = re.sub(r"\b(?:at\s+)?\d{1,2}:\d{2}\b", "", value, flags=re.IGNORECASE)
     text = re.sub(r"\b(?:at\s+)?\d{1,2}\s*(?:am|pm)\b", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b(?:at\s+)?(?:noon|midnight)\b", "", text, flags=re.IGNORECASE)
     return " ".join(text.split())
+
+
+def resolve_reminder_time(value: str, *, now: Optional[datetime] = None) -> datetime:
+    text = _normalize_whitespace(value)
+    if not text:
+        raise ValueError("Empty reminder time")
+
+    current = get_local_now(now)
+    tz = current.tzinfo or get_local_timezone()
+
+    try:
+        dt = datetime.fromisoformat(text)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=tz)
+        return dt.astimezone(tz)
+    except ValueError:
+        pass
+
+    relative_match = re.fullmatch(
+        r"in\s+(\d+)\s+(minute|minutes|hour|hours|day|days|week|weeks)",
+        text.lower(),
+    )
+    if relative_match:
+        amount = int(relative_match.group(1))
+        unit = relative_match.group(2)
+        if "minute" in unit:
+            delta = timedelta(minutes=amount)
+        elif "hour" in unit:
+            delta = timedelta(hours=amount)
+        elif "week" in unit:
+            delta = timedelta(weeks=amount)
+        else:
+            delta = timedelta(days=amount)
+        return current + delta
+
+    reminder_time = _extract_time(text)
+    date_text = _strip_time_expression(text) if reminder_time is not None else text
+    reminder_date = resolve_date_expression(date_text, now=current)
+
+    if reminder_time is None:
+        reminder_time = current.hour, current.minute
+
+    hour, minute = reminder_time
+    return datetime.combine(
+        reminder_date,
+        time(hour=hour, minute=minute),
+        tzinfo=tz,
+    )
+
+
+def normalize_recurrence_rule(value: str | None) -> str | None:
+    if value is None:
+        return None
+
+    text = _normalize_whitespace(value).lower()
+    if not text:
+        return None
+    if text == "weekdays":
+        return text
+
+    canonical_match = re.fullmatch(r"(hours|days|weeks):(\d+)", text)
+    if canonical_match:
+        amount = int(canonical_match.group(2))
+        if amount <= 0:
+            raise ValueError("Recurrence interval must be greater than zero")
+        return text
+
+    aliases = {
+        "hourly": "hours:1",
+        "every hour": "hours:1",
+        "daily": "days:1",
+        "every day": "days:1",
+        "weekly": "weeks:1",
+        "every week": "weeks:1",
+        "weekdays": "weekdays",
+        "every weekday": "weekdays",
+    }
+    if text in aliases:
+        return aliases[text]
+
+    interval_match = re.fullmatch(r"every\s+(\d+)\s+(hour|hours|day|days|week|weeks)", text)
+    if interval_match:
+        amount = int(interval_match.group(1))
+        unit = interval_match.group(2)
+        if amount <= 0:
+            raise ValueError("Recurrence interval must be greater than zero")
+        if "hour" in unit:
+            normalized_unit = "hours"
+        elif "week" in unit:
+            normalized_unit = "weeks"
+        else:
+            normalized_unit = "days"
+        return f"{normalized_unit}:{amount}"
+
+    raise ValueError(f"Unsupported recurrence rule: {value}")
+
+
+def describe_recurrence_rule(value: str | None) -> str:
+    normalized = normalize_recurrence_rule(value)
+    if normalized is None:
+        return "one-off"
+    if normalized == "weekdays":
+        return "every weekday"
+
+    unit, amount_text = normalized.split(":", 1)
+    amount = int(amount_text)
+    singular = unit[:-1]
+    label = singular if amount == 1 else unit
+    return f"every {amount} {label}"
+
+
+def advance_recurrence(start_at: datetime, recurrence: str) -> datetime:
+    normalized = normalize_recurrence_rule(recurrence)
+    if normalized is None:
+        raise ValueError("Recurrence rule is required")
+    if start_at.tzinfo is None:
+        raise ValueError("Recurrence start time must be timezone-aware")
+
+    if normalized == "weekdays":
+        next_run = start_at + timedelta(days=1)
+        while next_run.weekday() >= 5:
+            next_run += timedelta(days=1)
+        return next_run
+
+    unit, amount_text = normalized.split(":", 1)
+    amount = int(amount_text)
+    if unit == "hours":
+        return start_at + timedelta(hours=amount)
+    if unit == "days":
+        return start_at + timedelta(days=amount)
+    if unit == "weeks":
+        return start_at + timedelta(weeks=amount)
+    raise ValueError(f"Unsupported recurrence rule: {recurrence}")
 
 
 def resolve_event_time(value: str, *, now: Optional[datetime] = None) -> ResolvedEventTime:
