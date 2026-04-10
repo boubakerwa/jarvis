@@ -423,7 +423,7 @@
     <header>
       <div>
         <h1>Marvis docs</h1>
-        <div class="muted">Marvis is the local assistant that watches Gmail, files documents, writes shared notes, keeps memory, and exposes LLMOps telemetry through a local dashboard.</div>
+        <div class="muted">Marvis is the local assistant that watches Gmail, files documents, writes shared notes, schedules reminders, tracks work in GitHub, and exposes LLMOps telemetry through a local dashboard.</div>
       </div>
       <div class="muted">Standalone file: <code>docs/index.html</code></div>
     </header>
@@ -447,15 +447,19 @@
       <div class="grid">
         <div class="box">
           <h3>Assistant loop</h3>
-          <p>Marvis answers Telegram messages through the agent loop, with memory, Obsidian notes, Drive search, calendar, task, and financial tools available when needed.</p>
+          <p>Marvis answers Telegram messages through the agent loop, with memory, reminders, GitHub, source/log introspection, Obsidian notes, Drive search, calendar, task, and financial tools available when needed.</p>
         </div>
         <div class="box">
           <h3>Background watcher</h3>
-          <p>It polls Gmail on a timer, decides whether a message is worth filing, extracts attachments, classifies them, and stores them in Drive plus memory.</p>
+          <p>It polls Gmail on a timer, decides whether a message is worth filing, extracts attachments, classifies them, stores them in Drive plus memory, and can batch Telegram summaries by poll cycle.</p>
         </div>
         <div class="box">
           <h3>Operator visibility</h3>
-          <p>The local dashboard and <code>/llmops</code> surface token usage, estimated cost, heartbeat freshness, warnings, errors, and audit events such as note writes and calendar mutations.</p>
+          <p>The local dashboard, <code>/llmops</code>, and read-only source/log tools surface token usage, estimated cost, heartbeat freshness, warnings, errors, and audit events such as note writes and calendar mutations.</p>
+        </div>
+        <div class="box">
+          <h3>Proactive schedulers</h3>
+          <p>Marvis can now deliver scheduled reminders and a daily morning digest through Telegram while keeping the scheduling state local and inspectable.</p>
         </div>
       </div>
 
@@ -466,13 +470,15 @@
           <div class="arrow">→</div>
           <div class="node"><strong>Core agent</strong><span><code>core/agent.py</code></span></div>
           <div class="arrow">→</div>
-          <div class="node"><strong>Tools</strong><span>memory, notes, Drive, calendar, tasks</span></div>
+          <div class="node"><strong>Tools</strong><span>memory, reminders, GitHub, notes, Drive, calendar, tasks, source/log reads</span></div>
         </div>
         <div class="flow compact" style="margin-top:12px">
           <div class="leaf"><strong>Gmail watcher</strong><span>polls unread mail, files attachments</span></div>
+          <div class="leaf"><strong>Reminder + digest runners</strong><span>send proactive Telegram reminders and a daily backlog digest</span></div>
           <div class="leaf"><strong>OpenRouter</strong><span>model calls stay Anthropic-shaped</span></div>
+          <div class="leaf"><strong>GitHub repo</strong><span>issue tracking plus read-only pull request and commit inspection</span></div>
           <div class="leaf"><strong>Obsidian vault</strong><span>shared Markdown workspace for collaborative notes</span></div>
-          <div class="leaf"><strong>SQLite + ChromaDB</strong><span>memory, tasks, financial records</span></div>
+          <div class="leaf"><strong>SQLite + ChromaDB</strong><span>memory, tasks, reminders, and financial records</span></div>
           <div class="leaf"><strong>LLMOps + ops logs</strong><span>local telemetry and audit streams for the dashboard</span></div>
         </div>
       </div>
@@ -486,7 +492,7 @@
       <h2>Setup and how to run</h2>
       <ol>
         <li>Install Python 3.12, create a virtual environment, and install the requirements.</li>
-        <li>Copy <code>.env.example</code> to <code>.env</code> and fill in OpenRouter, Telegram, and Google credentials.</li>
+        <li>Copy <code>.env.example</code> to <code>.env</code> and fill in OpenRouter, Telegram, Google, and optional GitHub credentials.</li>
         <li>Create Google OAuth credentials with Gmail, Drive, and Calendar scopes, then authorize once so <code>token.json</code> is created.</li>
         <li>Start the app with <code>python main.py</code>.</li>
         <li>Open the dashboard at <code>http://127.0.0.1:8080/</code> and this docs page at <code>/docs</code>.</li>
@@ -496,7 +502,9 @@
         <tr><th>OpenRouter</th><td><code>OPENROUTER_API_KEY</code>, <code>OPENROUTER_MODEL</code>, optional task-specific model overrides</td></tr>
         <tr><th>Telegram</th><td><code>TELEGRAM_BOT_TOKEN</code>, <code>TELEGRAM_ALLOWED_USER_ID</code></td></tr>
         <tr><th>Google</th><td><code>GOOGLE_CREDENTIALS_PATH</code>, <code>GOOGLE_TOKEN_PATH</code></td></tr>
+        <tr><th>GitHub</th><td><code>JARVIS_GITHUB_REPOSITORY</code>, optional <code>JARVIS_GITHUB_TOKEN</code>, optional <code>JARVIS_GITHUB_API_BASE</code></td></tr>
         <tr><th>Notes</th><td><code>OBSIDIAN_VAULT_PATH</code>, optional <code>OBSIDIAN_ROOT_FOLDER</code> (use <code>.</code> for vault root)</td></tr>
+        <tr><th>Scheduling</th><td><code>JARVIS_MORNING_DIGEST_ENABLED</code>, <code>JARVIS_MORNING_TIME</code></td></tr>
         <tr><th>Runtime</th><td><code>GMAIL_POLL_INTERVAL</code>, <code>GMAIL_START_DATE</code>, <code>JARVIS_TIMEZONE</code></td></tr>
       </table>
 
@@ -513,18 +521,20 @@
     <section class="panel" id="telegram" data-panel>
       <h2>Telegram usage</h2>
       <div class="flow compact">
-        <div class="leaf"><strong>User message</strong><span>plain text goes into the agent loop</span></div>
-        <div class="leaf"><strong>Commands</strong><span><code>/status</code>, <code>/llmops</code>, <code>/memories</code>, <code>/forget</code>, <code>/reset</code></span></div>
+        <div class="leaf"><strong>User message</strong><span>plain text goes into the agent loop and replies include a running total LLM cost footer</span></div>
+        <div class="leaf"><strong>Commands</strong><span><code>/status</code>, <code>/llmops</code>, <code>/memories</code>, <code>/reminders</code>, <code>/linkedin</code>, <code>/forget</code>, <code>/reset</code></span></div>
         <div class="leaf"><strong>Uploads</strong><span>documents and photos are filed to Drive</span></div>
       </div>
 
       <table class="table" aria-label="Telegram commands">
         <tr><th>Any text</th><td>Passed to the agent as a normal chat message.</td></tr>
         <tr><th><code>/llmops</code></th><td>Shows recent model usage, estimated costs, latency, and short-horizon ops health.</td></tr>
+        <tr><th><code>/linkedin ...</code></th><td>Queues, lists, rewrites, or force-processes LinkedIn drafts from text or X/Twitter URLs.</td></tr>
         <tr><th><code>/memories</code></th><td>Lists stored memories grouped by category.</td></tr>
+        <tr><th><code>/reminders</code></th><td>Lists scheduled, cancelled, completed, or all reminders from the local reminder store.</td></tr>
         <tr><th><code>/forget &lt;topic&gt;</code></th><td>Deletes a memory by topic.</td></tr>
         <tr><th><code>/reset</code></th><td>Clears conversation history only. Long-term memory stays intact.</td></tr>
-        <tr><th><code>/status</code></th><td>Shows memory count, Drive state, Calendar state, notes state, and current model.</td></tr>
+        <tr><th><code>/status</code></th><td>Shows memory count, Drive state, Calendar state, notes state, LinkedIn queue depth, and current model.</td></tr>
       </table>
 
       <div class="note">
@@ -551,13 +561,13 @@
       </table>
 
       <div class="callout">
-        If the relevance or filing step fails, Marvis should lean toward not losing a document. The watcher is built around preserving useful mail, not silently discarding it.
+        If the relevance or filing step fails, Marvis should lean toward not losing a document. The watcher is built around preserving useful mail, not silently discarding it. When Telegram email summaries are enabled, multiple emails from the same poll cycle are aggregated into one proactive message.
       </div>
     </section>
 
     <section class="panel" id="architecture" data-panel>
       <h2>Interactive architecture flow</h2>
-      <p class="architecture-intro">Switch scenarios to trace how information moves across inputs, agents, tools and APIs, storage layers, and user-facing outputs. The same shared map powers chat, uploads, Gmail filing, document Q&amp;A, notes collaboration, and operator observability.</p>
+      <p class="architecture-intro">Switch scenarios to trace how information moves across inputs, agents, tools and APIs, storage layers, and user-facing outputs. The same shared map powers chat, uploads, Gmail filing, document Q&amp;A, notes collaboration, reminder/task flows, and operator observability.</p>
 
       <div class="note">
         <strong>Accuracy note</strong>
@@ -601,7 +611,7 @@
                 <button class="arch-node" type="button" data-node="input-dashboard">
                   <span class="node-kicker">Input</span>
                   <strong>Dashboard browser</strong>
-                  <span>A local browser session requests dashboard fragments and the docs route from <code>dashboard/app.py</code>.</span>
+                  <span>A local browser session requests dashboard fragments, the docs route, and the LinkedIn editor workspace from <code>dashboard/app.py</code>.</span>
                 </button>
               </div>
             </div>
@@ -653,7 +663,7 @@
                 <button class="arch-node" type="button" data-node="tool-agent-tools">
                   <span class="node-kicker">Tooling</span>
                   <strong>Local tools &amp; managers</strong>
-                  <span>Memory updates, note operations, task operations, and Drive or calendar helpers coordinated by the chat loop and upload handlers.</span>
+                  <span>Memory updates, reminder state, note operations, GitHub issue creation plus read-only PR/commit reads, source/log reads, task operations, and Drive or calendar helpers coordinated by the chat loop and upload handlers.</span>
                 </button>
                 <button class="arch-node" type="button" data-node="tool-observability">
                   <span class="node-kicker">Runtime</span>
@@ -674,7 +684,7 @@
                 <button class="arch-node" type="button" data-node="storage-memory">
                   <span class="node-kicker">Storage</span>
                   <strong>SQLite + ChromaDB</strong>
-                  <span>Memories, tasks, financial records, and semantic recall stay local under <code>memory/manager.py</code>.</span>
+                  <span>Memories, tasks, reminders, financial records, and semantic recall stay local under SQLite-backed managers plus ChromaDB retrieval.</span>
                 </button>
                 <button class="arch-node" type="button" data-node="storage-notes">
                   <span class="node-kicker">Storage</span>
@@ -725,7 +735,7 @@
                 <button class="arch-node" type="button" data-node="output-dashboard">
                   <span class="node-kicker">Output</span>
                   <strong>Dashboard surfaces</strong>
-                  <span>The overview, Drive, memory, docs, and LLMOps views render local state for operator inspection.</span>
+                  <span>The overview, Drive, memory, LinkedIn, docs, and LLMOps views render local state for operator inspection.</span>
                 </button>
               </div>
             </div>
@@ -898,7 +908,7 @@
         "telegram-chat": {
           title: "Telegram chat",
           summary: "Plain-text requests enter the long-lived Chat Agent, which builds a memory-backed prompt, decides whether tools are needed, and returns a Telegram reply while recording model and ops telemetry.",
-          note: "The highlighted path shows the full tool envelope the Chat Agent can reach. A specific turn may use only a subset of these branches, including note reads or writes.",
+          note: "The highlighted path shows the full tool envelope the Chat Agent can reach. A specific turn may use only a subset of these branches, including reminders, GitHub issue creation, or read-only source and log inspection.",
           nodes: [
             "input-telegram-chat",
             "agent-chat",
@@ -936,7 +946,7 @@
           steps: [
             "Telegram text reaches `JarvisAgent.chat(...)` through the single-user bot handler.",
             "The system prompt pulls in semantically relevant memories plus local time context before the model call.",
-            "The Chat Agent loops through OpenRouter, optionally calling local tools and managers for memory, notes, Drive, calendar, or tasks.",
+            "The Chat Agent loops through OpenRouter, optionally calling local tools and managers for memory, reminders, GitHub, notes, Drive, calendar, logs, source reads, or tasks.",
             "Model telemetry and side-effect audit events are written to local JSONL streams as the turn progresses.",
             "Tool results re-enter the loop, and the final answer is sent back as a Telegram reply.",
           ],
@@ -945,7 +955,8 @@
             { label: "Chat loop", path: "core/agent.py", detail: "Runs Anthropic-style tool calls and response assembly." },
             { label: "Prompt builder", path: "core/prompts.py", detail: "Injects relevant memories and time context into the system prompt." },
             { label: "Notes workspace", path: "notes/service.py", detail: "Creates and appends collaborative Markdown notes in Obsidian." },
-            { label: "Local storage", path: "memory/manager.py", detail: "Persists memories, tasks, and financial records in SQLite and ChromaDB." },
+            { label: "Reminder scheduler", path: "reminders/service.py", detail: "Stores and delivers proactive Telegram reminders from local SQLite state." },
+            { label: "Local storage", path: "memory/manager.py", detail: "Persists memories, tasks, reminders, and financial records in SQLite and ChromaDB." },
           ],
         },
         "telegram-upload": {
@@ -1112,7 +1123,7 @@
         "notes-observability": {
           title: "Notes & observability",
           summary: "Note-oriented chat requests use the same Chat Agent loop, but write into the shared Obsidian workspace while every model call and mutation is captured for the dashboard and `/llmops` views.",
-          note: "The dashboard is read-only. Notes are created or appended through the tool layer, then surfaced back through audit and telemetry streams.",
+          note: "Most dashboard surfaces are read-only, but the LinkedIn tab can open, edit, save, and re-trigger draft generation while notes and telemetry still flow through the same local audit streams.",
           nodes: [
             "input-telegram-chat",
             "input-dashboard",
@@ -1148,20 +1159,20 @@
             "A Telegram request asks Marvis to capture or extend something in the shared notes workspace.",
             "The Chat Agent decides whether it should search existing notes first, then creates or appends Markdown through the notes manager.",
             "Every model call records LLM telemetry, while note writes emit audit events into the ops streams.",
-            "The dashboard and `/llmops` surfaces read those local JSONL files so you can inspect recent note mutations, model costs, and ops health.",
+            "The dashboard and `/llmops` surfaces read those local JSONL files so you can inspect recent note mutations, model costs, ops health, and LinkedIn draft state.",
           ],
           sources: [
             { label: "Chat loop", path: "core/agent.py", detail: "Exposes generic note tools and records LLM activity for each model call." },
             { label: "Notes manager", path: "notes/service.py", detail: "Writes Markdown notes and emits audit events for note creation and append operations." },
             { label: "LLMOps recorder", path: "core/llmops.py", detail: "Stores per-call latency, token usage, and estimated cost in local JSONL." },
             { label: "Ops logger", path: "core/opslog.py", detail: "Persists heartbeats, warnings, errors, and audits with retention-aware pruning." },
-            { label: "Dashboard", path: "dashboard/app.py", detail: "Renders recent telemetry, issue trends, and audit history for operator inspection." },
+            { label: "Dashboard", path: "dashboard/app.py", detail: "Renders telemetry, issue trends, audit history, and the editable LinkedIn workspace." },
           ],
         },
         "calendar-tasks": {
           title: "Calendar & tasks",
-          summary: "Date-driven requests start in chat, resolve against local time context, then update Google Calendar or local task storage before the answer comes back with absolute dates and audit telemetry.",
-          note: "Tasks stay local in SQLite, while calendar events flow through the Google Calendar client. The reply should still mention the resolved absolute date either way.",
+          summary: "Date-driven requests start in chat, resolve against local time context, then update Google Calendar or local task/reminder storage before the answer comes back with absolute dates and audit telemetry.",
+          note: "Tasks and reminders stay local in SQLite-backed stores, while calendar events flow through the Google Calendar client. The reply should still mention the resolved absolute date either way.",
           nodes: [
             "input-telegram-chat",
             "agent-chat",
@@ -1192,7 +1203,7 @@
           steps: [
             "A Telegram request asks what is scheduled, creates an event, or explicitly asks for a task or reminder.",
             "The Chat Agent uses time-aware helpers so relative dates such as today, tomorrow, or Monday resolve correctly.",
-            "Calendar operations write to Google Calendar, while task operations remain in local SQLite-backed storage.",
+            "Calendar operations write to Google Calendar, while task and reminder operations remain in local SQLite-backed storage and can trigger proactive Telegram sends later.",
             "The reply returns to Telegram with the resolved absolute date and the resulting task or calendar state.",
           ],
           sources: [

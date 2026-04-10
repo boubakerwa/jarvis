@@ -5,7 +5,7 @@
 <h1 align="center">Marvis</h1>
 
 <p align="center">
-  <strong>Marvelous Jarvis</strong> is a local AI assistant that talks over Telegram, watches Gmail, files documents into Google Drive, remembers useful context, and stays inspectable through a local dashboard.
+  <strong>Marvelous Jarvis</strong> is a local AI assistant that talks over Telegram, watches Gmail, files documents into Google Drive, remembers useful context, schedules reminders, tracks work in GitHub, and stays inspectable through a local dashboard.
 </p>
 
 <p align="center">
@@ -43,12 +43,15 @@ That gives you an assistant that can actually do useful local work:
 
 | Surface | What Marvis does |
 |---|---|
-| Telegram chat | answers questions, recalls memory, searches Drive context, creates tasks, checks calendar |
+| Telegram chat | answers questions, recalls memory, searches Drive context, creates tasks and reminders, checks calendar, and can inspect local source/log context |
 | Gmail watcher | scans unread mail after a cutoff date, filters low-value mail, files useful attachments |
 | Google Drive filing | classifies uploads and attachments into a fixed folder structure with predictable names |
 | Memory | stores durable facts, preferences, decisions, and document references in SQLite plus ChromaDB |
+| GitHub workflow | creates trackable feature or bug issues and reads pull requests and commits from the configured repo |
 | Obsidian notes | writes collaborative Markdown notes into a shared vault with Marvis-chosen organization |
-| Dashboard | shows overview, memory, Drive files, LLMOps telemetry, activity, and interactive docs |
+| LinkedIn composer | queues drafts from Telegram, stores generation state locally, and exposes an editor/retry workflow in the dashboard |
+| Background schedulers | sends scheduled reminders, morning digests, and batched Gmail summaries over Telegram |
+| Dashboard | shows overview, memory, Drive files, LinkedIn drafts, LLMOps telemetry, activity, and interactive docs |
 | Docs | ships with local architecture docs plus a Medium-ready article draft |
 
 ## Architecture
@@ -129,6 +132,8 @@ Interactive architecture docs live in [docs/index.html](./docs/index.html) and o
 ### Runtime Roles
 
 - **Chat Agent** (`core/agent.py`) handles the Anthropic-format tool loop and assembles final replies.
+- **Reminder runner** (`reminders/service.py`) persists scheduled reminders and delivers them via Telegram in the background.
+- **GitHub client** (`github_issues/client.py`) reads repository issues, pull requests, and commits and can create issues when configured.
 - **Notes Manager** (`notes/service.py`) creates, updates, and appends collaborative Markdown notes in the shared Obsidian vault.
 - **LLMOps recorder** (`core/llmops.py`) captures per-call latency, token usage, and estimated model cost in local JSONL.
 - **Ops logger** (`core/opslog.py`) records heartbeats, issues, and audit events for note writes, Drive uploads, and other mutations.
@@ -136,6 +141,7 @@ Interactive architecture docs live in [docs/index.html](./docs/index.html) and o
 - **Classification Agent** (`agent_sdk/filer.py`) picks the Drive path, filename, and summary for attachments and uploads.
 - **Vision Agent** (`utils/text_extraction.py`) describes image-heavy documents when plain extraction is not enough.
 - **Financial Agent** (`utils/financial_extraction.py`) extracts vendor, amount, category, and date for finance-oriented documents.
+- **Morning digest runner** (`morning_digest/digest.py`) sends a daily Telegram digest with open backlog context.
 
 ## What Makes It Reliable
 
@@ -159,13 +165,18 @@ This turned out to matter more than prompt polish. The biggest failures in agent
 | Claude-style agent loop | Hand-rolled `system + messages + tools` loop with `tool_use` / `tool_result` round trips |
 | OpenRouter routing | Anthropic-compatible transport with Claude as the safe default and optional task-level overrides |
 | Persistent memory | SQLite for source of truth plus ChromaDB for semantic retrieval |
+| Proactive reminders | Schedules one-off or recurring Telegram reminders with cancellation and list support |
 | Gmail monitoring | Polls unread mail every 5 minutes and starts only after the configured cutoff date |
+| Morning digest | Sends a daily Telegram digest with open GitHub issues and a suggested focus item |
 | Smart filing | Classifies documents and uploads them into a structured Google Drive library |
 | Financial extraction | Pulls vendor, amount, date, and category from finance-oriented documents |
-| Telegram bot | Single-user bot with slash commands, uploads, and long-polling deployment |
+| GitHub integration | Creates GitHub issues and reads pull requests or commits from the configured repository |
+| Local introspection tools | Lets the agent read project files and structured ops logs in a sandboxed, read-only way |
+| Telegram bot | Single-user bot with slash commands, uploads, reminder views, LinkedIn drafting, and long-polling deployment |
+| LinkedIn composer | Queues drafts from Telegram text or X URLs and supports dashboard editing plus retry flows |
 | Obsidian integration | Creates and updates collaborative Markdown notes in a configurable vault path |
 | LLMOps and ops audit | Tracks token usage, estimated cost, heartbeats, warnings, errors, and mutation audit events in local JSONL |
-| Dashboard | Overview, memory browser, Drive mirror, LLMOps telemetry, activity log, and interactive docs |
+| Dashboard | Overview, memory browser, Drive mirror, LinkedIn workspace, LLMOps telemetry, activity log, and interactive docs |
 | Article-ready docs | Includes a Medium draft that explains the architecture and tradeoffs |
 
 ## Quick Start
@@ -205,6 +216,10 @@ GOOGLE_TOKEN_PATH=token.json
 JARVIS_TIMEZONE=Europe/Berlin
 OBSIDIAN_VAULT_PATH=/absolute/path/to/your/Obsidian/vault
 OBSIDIAN_ROOT_FOLDER=.
+JARVIS_GITHUB_REPOSITORY=owner/repo
+# JARVIS_GITHUB_TOKEN=ghp_xxx
+JARVIS_MORNING_DIGEST_ENABLED=true
+JARVIS_MORNING_TIME=09:00
 
 # Optional lower-risk Gemma routing:
 # OPENROUTER_MODEL_RELEVANCE=google/gemma-4-31b-it
@@ -236,12 +251,14 @@ Open [http://127.0.0.1:8080](http://127.0.0.1:8080).
 
 | Command | Description |
 |---|---|
-| Any message | Goes through the chat agent |
-| `/status` | Shows memory count, Drive status, and configured model |
+| Any message | Goes through the chat agent and replies include the running total estimated LLM cost footer |
+| `/status` | Shows memory count, Drive status, LinkedIn queue status, and configured model |
 | `/llmops` | Shows recent token usage, estimated LLM cost, latency, top LLM tasks, and short-horizon ops health |
 | `/memories` | Lists stored memories grouped by category |
+| `/reminders [scheduled|cancelled|completed|all]` | Lists reminders currently stored in the local reminder scheduler |
 | `/forget <topic>` | Deletes a memory by topic |
 | `/reset` | Clears in-session chat history while preserving long-term memory |
+| `/linkedin ...` | Queues, lists, rewrites, or processes LinkedIn drafts from text or X/Twitter URLs |
 | File or photo upload | Runs the classification and filing pipeline |
 
 ## Memory Model
@@ -272,6 +289,8 @@ Once enabled, you can ask things like:
 - `Please write a new article draft for local-first assistants`
 - `What are my hottest project ideas right now?`
 
+Trackable engineering work no longer needs to live in Obsidian notes. Feature requests, implementation prompts, and bug reports can now be created as GitHub issues through the agent when `JARVIS_GITHUB_REPOSITORY` is configured, while Obsidian stays focused on collaborative drafting and scratch work.
+
 ## Drive Filing Layout
 
 Files are organized under the existing Drive root folder `Jarvis/` for backward compatibility.
@@ -290,6 +309,7 @@ Jarvis/
 |- Real Estate/
 |- Vehicles/
 |- Projects & Side Hustles/ (Sufra, Other)
+|- PR/                 (LinkedIn Composer)
 |- Personal Development/    (Courses & Certificates, Books & Resources)
 |- Household/         (Appliances & Warranties, Repairs & Services, Utilities)
 `- Misc/
@@ -306,8 +326,11 @@ The local dashboard gives Marvis an operator surface instead of a black box:
 - **Overview** for system status and recent activity
 - **Memory** to inspect what Marvis currently retains about you
 - **Drive** to mirror the Google Drive files Marvis can see
+- **LinkedIn** to open, edit, save, and re-trigger queued LinkedIn drafts
 - **LLMOps** for token usage, estimated model cost, inline charts, heartbeat freshness, issue breakdowns, and recent audit events
 - **Docs** for architecture walkthroughs and setup help
+
+The dashboard also detects stale runtime processes and surfaces a warning banner when the running dashboard code is older than the repo checkout.
 
 Observability data now uses retention-aware JSONL streams:
 
@@ -342,14 +365,24 @@ jarvis/
 |  `- settings.py
 |- core/
 |  |- agent.py
+|  |- log_reader.py
 |  |- llmops.py
 |  |- llm_client.py
 |  |- opslog.py
 |  |- prompts.py
+|  |- source_reader.py
 |  |- structured_output.py
 |  `- time_utils.py
+|- github_issues/
+|  |- client.py
+|  |- intents.py
+|  |- models.py
+|  `- service.py
 |- calendar_api/
 |  `- client.py
+|- reminders/
+|  |- __init__.py
+|  `- service.py
 |- memory/
 |  |- manager.py
 |  `- schema.py
@@ -357,6 +390,16 @@ jarvis/
 |  |- parser.py
 |  |- relevance.py
 |  `- watcher.py
+|- morning_digest/
+|  |- __init__.py
+|  `- digest.py
+|- linkedin/
+|  |- composer.py
+|  |- drive_store.py
+|  |- obsidian_store.py
+|  |- processor.py
+|  |- sqlite_store.py
+|  `- x_resolver.py
 |- storage/
 |  |- drive.py
 |  `- schema.py
@@ -391,6 +434,9 @@ The branch includes automated coverage for:
 - date resolution and calendar safety
 - Gmail watcher cutoff behavior
 - note workspace creation, append, and search behavior
+- reminder scheduling and delivery flows
+- GitHub issue / PR / commit integration
+- read-only source and log introspection tools
 - LLMOps telemetry summaries and ops audit logging
 - dashboard rendering and client-side interactions
 - Telegram command publishing
