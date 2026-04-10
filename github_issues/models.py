@@ -35,3 +35,34 @@ class IssueAgentResponse:
     intent: IssueIntent
     issue: IssueSummary | None = None
     issues: tuple[IssueSummary, ...] = ()
+
+
+@dataclass(frozen=True)
+class PullRequestSummary:
+    number: int
+    title: str
+    state: str
+    url: str
+    author: str | None = None
+    base_branch: str | None = None
+    head_branch: str | None = None
+    updated_at: str | None = None
+    body: str | None = None
+    additions: int = 0
+    deletions: int = 0
+    changed_files: int = 0
+    commit_count: int = 0
+
+
+@dataclass(frozen=True)
+class CommitSummary:
+    sha: str
+    short_sha: str
+    message: str
+    url: str
+    author: str | None = None
+    committed_at: str | None = None
+    additions: int = 0
+    deletions: int = 0
+    changed_files: int = 0
+    files: tuple[str, ...] = ()

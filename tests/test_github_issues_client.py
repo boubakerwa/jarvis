@@ -96,6 +96,71 @@ class GitHubIssuesClientTests(unittest.TestCase):
         self.assertIn("Authorization", captured["headers"])
         self.assertEqual(issue.number, 12)
 
+    def test_list_pull_requests_maps_summary_fields(self):
+        captured = {}
+
+        def fake_request(method, url, headers, payload):
+            captured["method"] = method
+            captured["url"] = url
+            return [
+                {
+                    "number": 14,
+                    "title": "Add reminder scheduling",
+                    "state": "open",
+                    "html_url": "https://github.com/owner/repo/pull/14",
+                    "user": {"login": "wess"},
+                    "base": {"ref": "main"},
+                    "head": {"ref": "codex/reminders"},
+                    "updated_at": "2026-04-10T12:00:00Z",
+                }
+            ]
+
+        client = GitHubIssuesClient(
+            GitHubClientConfig(repository="owner/repo", token=None),
+            request_json=fake_request,
+        )
+        prs = client.list_pull_requests(state="open", limit=10)
+
+        self.assertEqual(captured["method"], "GET")
+        self.assertIn("/repos/owner/repo/pulls", captured["url"])
+        self.assertEqual(len(prs), 1)
+        self.assertEqual(prs[0].number, 14)
+        self.assertEqual(prs[0].author, "wess")
+        self.assertEqual(prs[0].base_branch, "main")
+        self.assertEqual(prs[0].head_branch, "codex/reminders")
+
+    def test_get_commit_maps_files_and_stats(self):
+        def fake_request(method, url, headers, payload):
+            self.assertEqual(method, "GET")
+            self.assertIn("/repos/owner/repo/commits/abc123", url)
+            return {
+                "sha": "abc123456789",
+                "html_url": "https://github.com/owner/repo/commit/abc123456789",
+                "author": {"login": "wess"},
+                "commit": {
+                    "message": "Add reminder support\n\nMore detail",
+                    "author": {"name": "Wess", "date": "2026-04-10T13:00:00Z"},
+                },
+                "stats": {"additions": 12, "deletions": 3},
+                "files": [
+                    {"filename": "core/agent.py"},
+                    {"filename": "reminders/service.py"},
+                ],
+            }
+
+        client = GitHubIssuesClient(
+            GitHubClientConfig(repository="owner/repo", token=None),
+            request_json=fake_request,
+        )
+        commit = client.get_commit("abc123")
+
+        self.assertEqual(commit.short_sha, "abc12345")
+        self.assertEqual(commit.author, "wess")
+        self.assertEqual(commit.additions, 12)
+        self.assertEqual(commit.deletions, 3)
+        self.assertEqual(commit.changed_files, 2)
+        self.assertEqual(commit.files, ("core/agent.py", "reminders/service.py"))
+
 
 if __name__ == "__main__":
     unittest.main()
