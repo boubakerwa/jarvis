@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import sqlite3
+import subprocess
 from collections import Counter
 from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta, timezone
@@ -26,6 +27,8 @@ from core.opslog import (
     OPS_ISSUES_PATH as DEFAULT_OPS_ISSUES_PATH,
     read_jsonl,
 )
+from notes.obsidian import ObsidianVault
+from notes.service import NotesManager
 from storage.schema import JARVIS_ROOT
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -44,6 +47,9 @@ OPS_AUDIT_PATH = DEFAULT_OPS_AUDIT_PATH
 logger = logging.getLogger(__name__)
 _DRIVE_CACHE_TTL_SECONDS = 60.0
 _drive_snapshot_cache: dict[str, Any] = {"fetched_at": 0.0, "payload": None}
+_REPO_COMMIT_CACHE_TTL_SECONDS = 5.0
+_repo_commit_cache: dict[str, Any] = {"fetched_at": 0.0, "value": ""}
+_SERVER_STARTED_AT = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 _PROCESSING_RE = re.compile(
     r"^(?P<ts>\S+ \S+) \[INFO\] __main__: Processing email: from=(?P<sender>.+?) subject=(?P<subject>.+?) attachments=(?P<attachments>\d+)$"
@@ -57,6 +63,48 @@ _NO_ATTACHMENTS_RE = re.compile(
 _FILED_RE = re.compile(
     r"^(?P<ts>\S+ \S+) \[INFO\] __main__: Filed attachment '(?P<filename>.+?)' -> (?P<top_level>.+?)/(?P<sub_folder>.+?) \(Drive ID: (?P<drive_id>.+?)\)$"
 )
+
+
+def _resolve_git_commit(repo_root: Path | None = None) -> str:
+    root = repo_root or ROOT
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "--short=12", "HEAD"],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            timeout=1.5,
+            check=True,
+        )
+    except Exception:
+        return ""
+    return completed.stdout.strip()
+
+
+_RUNTIME_COMMIT = _resolve_git_commit(ROOT)
+
+
+def _current_repo_commit() -> str:
+    now = monotonic()
+    cached_value = str(_repo_commit_cache.get("value", ""))
+    fetched_at = float(_repo_commit_cache.get("fetched_at", 0.0))
+    if cached_value and (now - fetched_at) < _REPO_COMMIT_CACHE_TTL_SECONDS:
+        return cached_value
+    current = _resolve_git_commit(ROOT)
+    _repo_commit_cache["value"] = current
+    _repo_commit_cache["fetched_at"] = now
+    return current
+
+
+def _dashboard_runtime_info() -> dict[str, Any]:
+    repo_commit = _current_repo_commit()
+    runtime_commit = _RUNTIME_COMMIT
+    return {
+        "serverStartedAt": _SERVER_STARTED_AT,
+        "runtimeCommit": runtime_commit,
+        "repoCommit": repo_commit,
+        "runtimeStale": bool(runtime_commit and repo_commit and runtime_commit != repo_commit),
+    }
 
 
 @dataclass
@@ -124,6 +172,8 @@ class MemoryItem:
 @dataclass
 class LinkedInDraftItem:
     draft_id: str
+    lookup_id: str
+    can_retry: bool
     headline: str
     hook: str
     full_post: str
@@ -239,6 +289,84 @@ class OpsEventItem:
 class HeartbeatPoint:
     ts: str
     age_seconds: int
+
+
+def _build_notes_manager() -> NotesManager | None:
+    vault_path = getattr(settings, "OBSIDIAN_VAULT_PATH", "").strip()
+    if not vault_path:
+        return None
+    try:
+        return NotesManager(
+            ObsidianVault(
+                vault_path,
+                getattr(settings, "OBSIDIAN_ROOT_FOLDER", "Marvis"),
+            )
+        )
+    except Exception as exc:
+        logger.warning("Dashboard notes manager init failed: %s", exc)
+        return None
+
+
+def _strip_leading_frontmatter_blocks(text: str) -> str:
+    normalized = text.replace("\r\n", "\n").lstrip("\ufeff")
+    while normalized.startswith("---\n"):
+        match = re.match(r"\A---\n.*?\n---(?:\n|$)", normalized, re.DOTALL)
+        if not match:
+            break
+        normalized = normalized[match.end():].lstrip("\n")
+    return normalized.lstrip()
+
+
+def _prettify_linkedin_title(value: str) -> str:
+    stem = re.sub(r"\.md$", "", str(value or "").strip(), flags=re.IGNORECASE)
+    stem = re.sub(r"[_-][0-9a-f]{8}$", "", stem)
+    text = re.sub(r"[_-]+", " ", stem).strip()
+    if not text:
+        return "Untitled draft"
+    return text[0].upper() + text[1:]
+
+
+def _extract_linkedin_headline_and_excerpt(note_text: str, fallback_title: str) -> tuple[str, str]:
+    body = _strip_leading_frontmatter_blocks(note_text)
+    if not body:
+        return fallback_title, ""
+
+    title = fallback_title
+    excerpt_lines: list[str] = []
+    for line in body.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("# ") and title == fallback_title:
+            title = stripped[2:].strip() or fallback_title
+            continue
+        excerpt_lines.append(stripped)
+        if len(" ".join(excerpt_lines)) >= 220:
+            break
+
+    excerpt = re.sub(r"\s+", " ", " ".join(excerpt_lines)).strip()
+    if len(excerpt) > 220:
+        excerpt = excerpt[:217].rstrip() + "..."
+    return title, excerpt
+
+
+def _read_note_content(
+    note_path: str,
+    *,
+    notes_manager: NotesManager | None = None,
+    max_chars: int = 500_000,
+) -> tuple[str, str, bool]:
+    if not note_path:
+        return "", "", False
+    manager = notes_manager or _build_notes_manager()
+    if manager is None:
+        return "", "", False
+    try:
+        note = manager.read_note(note_path, max_chars=max_chars)
+        return str(note.get("content", "")), str(note.get("modified_at", "")), True
+    except Exception as exc:
+        logger.warning("Dashboard note read failed for %s: %s", note_path, exc)
+        return "", "", False
 
 
 def _read_lines(path: Path, limit: int = 200) -> list[str]:
@@ -917,17 +1045,28 @@ def _load_linkedin_drafts_from_sqlite(limit: int = 20) -> tuple[list[LinkedInDra
         return [], f"unavailable: {exc}"
 
     items: list[LinkedInDraftItem] = []
+    notes_manager = _build_notes_manager()
     for row in rows:
         r = dict(row)
         try:
             tags = json.loads(r.get("library_tags") or "[]")
         except Exception:
             tags = []
+        fallback_title = _prettify_linkedin_title(str(r.get("obsidian_filename", "") or r.get("id", "")[:8]))
+        note_text, _, note_loaded = _read_note_content(
+            str(r.get("obsidian_path", "")),
+            notes_manager=notes_manager,
+            max_chars=50_000,
+        )
+        effective_status = _effective_linkedin_status(r, note_loaded=note_loaded, content=note_text)
+        headline, hook = _extract_linkedin_headline_and_excerpt(note_text, fallback_title)
         items.append(
             LinkedInDraftItem(
                 draft_id=str(r.get("id", ""))[:8],
-                headline=str(r.get("obsidian_filename", "") or r.get("id", "")[:8]),
-                hook="",
+                lookup_id=str(r.get("id", "")),
+                can_retry=effective_status != "pending_generation",
+                headline=headline,
+                hook=hook,
                 full_post="",
                 voice=str(r.get("voice", "")),
                 pillar_label=str(r.get("pillar_label", "")),
@@ -939,13 +1078,201 @@ def _load_linkedin_drafts_from_sqlite(limit: int = 20) -> tuple[list[LinkedInDra
                 generation_mode="llm",
                 created_at=str(r.get("created_at", ""))[:19].replace("T", " "),
                 updated_at=str(r.get("updated_at", ""))[:19].replace("T", " "),
-                status=str(r.get("status", "")),
+                status=effective_status,
                 obsidian_path=str(r.get("obsidian_path", "")),
                 obsidian_filename=str(r.get("obsidian_filename", "")),
                 attempts=int(r.get("attempts", 0)),
             )
         )
     return items, f"loaded {len(items)} draft(s)"
+
+
+def _load_linkedin_draft_row(draft_id_prefix: str) -> dict[str, Any] | None:
+    prefix = str(draft_id_prefix or "").strip()
+    if not prefix:
+        return None
+    try:
+        conn = sqlite3.connect(settings.JARVIS_DB_PATH, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM linkedin_drafts WHERE id LIKE ? ORDER BY created_at DESC LIMIT 1",
+            (prefix + "%",),
+        ).fetchone()
+        conn.close()
+    except Exception as exc:
+        logger.warning("Dashboard LinkedIn draft lookup failed: %s", exc)
+        return None
+    return dict(row) if row else None
+
+
+def _build_linkedin_scaffold(row: dict[str, Any]) -> str:
+    fallback_title = _prettify_linkedin_title(str(row.get("obsidian_filename", "") or row.get("id", "")[:8]))
+    source_text = str(row.get("source_text", "") or "").strip()
+    source_url = str(row.get("source_url", "") or "").strip()
+    lines = [f"# {fallback_title}"]
+    if source_text:
+        lines.extend(["", source_text])
+    if source_url:
+        lines.extend(["", f"Source: {source_url}"])
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _is_linkedin_scaffold_content(row: dict[str, Any], content: str) -> bool:
+    return str(content or "").strip() == _build_linkedin_scaffold(row).strip()
+
+
+def _effective_linkedin_status(row: dict[str, Any], *, note_loaded: bool, content: str) -> str:
+    raw_status = str(row.get("status", "") or "")
+    note_path = str(row.get("obsidian_path", "") or "")
+    if raw_status == "ready" and note_path:
+        if not note_loaded or not str(content or "").strip():
+            return "needs_attention"
+        if _is_linkedin_scaffold_content(row, content):
+            return "needs_attention"
+    return raw_status
+
+
+def _linkedin_editor_payload(draft_id_prefix: str) -> tuple[dict[str, Any], int]:
+    row = _load_linkedin_draft_row(draft_id_prefix)
+    if row is None:
+        return {"error": "LinkedIn draft not found."}, 404
+
+    note_path = str(row.get("obsidian_path", "") or "")
+    notes_manager = _build_notes_manager()
+    content = ""
+    modified_at = ""
+    detail = ""
+    editable = False
+    note_loaded = False
+
+    if note_path and notes_manager is not None:
+        content, modified_at, note_loaded = _read_note_content(note_path, notes_manager=notes_manager)
+        editable = True
+        detail = "Loaded from Obsidian." if note_loaded and content else "Could not read the saved post from Obsidian. Showing a fallback scaffold."
+    elif note_path:
+        detail = "Obsidian vault is not configured for editing on this machine."
+    else:
+        detail = "This draft is still waiting to be written to Obsidian, so the editor is preview-only."
+
+    if not content:
+        content = _build_linkedin_scaffold(row)
+
+    effective_status = _effective_linkedin_status(row, note_loaded=note_loaded, content=content)
+    if effective_status == "needs_attention" and str(row.get("status", "")) == "ready":
+        if note_loaded and _is_linkedin_scaffold_content(row, content):
+            detail = "Saved note still contains the fallback scaffold. Re-trigger this post to regenerate it."
+        elif note_path:
+            detail = "Could not read the saved post from Obsidian. Showing a fallback scaffold."
+
+    headline, excerpt = _extract_linkedin_headline_and_excerpt(
+        content,
+        _prettify_linkedin_title(str(row.get("obsidian_filename", "") or row.get("id", "")[:8])),
+    )
+    return (
+        {
+            "draftId": str(row.get("id", "")),
+            "headline": headline,
+            "excerpt": excerpt,
+            "status": effective_status,
+            "rawStatus": str(row.get("status", "")),
+            "voice": str(row.get("voice", "")),
+            "pillarLabel": str(row.get("pillar_label", "")),
+            "sourceType": str(row.get("source_type", "")),
+            "sourceLabel": str(row.get("source_author", "") or row.get("source_url", "")),
+            "obsidianPath": note_path,
+            "obsidianFilename": str(row.get("obsidian_filename", "")),
+            "modifiedAt": modified_at or str(row.get("updated_at", "")),
+            "editable": editable,
+            "canRetry": effective_status != "pending_generation",
+            "detail": detail,
+            "content": content,
+        },
+        200,
+    )
+
+
+def _save_linkedin_draft_content(draft_id_prefix: str, content: str) -> tuple[dict[str, Any], int]:
+    row = _load_linkedin_draft_row(draft_id_prefix)
+    if row is None:
+        return {"error": "LinkedIn draft not found."}, 404
+
+    note_path = str(row.get("obsidian_path", "") or "")
+    if not note_path:
+        return {"error": "This draft does not have an Obsidian note yet."}, 409
+
+    notes_manager = _build_notes_manager()
+    if notes_manager is None:
+        return {"error": "Obsidian vault is not configured for editing on this machine."}, 503
+
+    cleaned_content = str(content or "").replace("\r\n", "\n").strip()
+    if not cleaned_content:
+        return {"error": "Markdown content cannot be empty."}, 400
+
+    try:
+        notes_manager.update_note(
+            note_path,
+            content=cleaned_content,
+            preserve_frontmatter=False,
+        )
+    except Exception as exc:
+        logger.warning("Dashboard LinkedIn draft save failed for %s: %s", note_path, exc)
+        return {"error": f"Failed to save note: {exc}"}, 500
+
+    try:
+        conn = sqlite3.connect(settings.JARVIS_DB_PATH, check_same_thread=False)
+        conn.execute(
+            "UPDATE linkedin_drafts SET updated_at=? WHERE id=?",
+            (datetime.now(timezone.utc).isoformat(), str(row.get("id", ""))),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as exc:
+        logger.warning("Dashboard LinkedIn updated_at touch failed: %s", exc)
+
+    payload, status_code = _linkedin_editor_payload(str(row.get("id", ""))[:8])
+    if status_code == 200:
+        payload["detail"] = "Saved to Obsidian."
+    return payload, status_code
+
+
+def _retry_linkedin_draft_processing(draft_id_prefix: str) -> tuple[dict[str, Any], int]:
+    row = _load_linkedin_draft_row(draft_id_prefix)
+    if row is None:
+        return {"error": "LinkedIn draft not found."}, 404
+
+    notes_manager = _build_notes_manager()
+    if notes_manager is None:
+        return {"error": "Obsidian vault is not configured for LinkedIn post processing on this machine."}, 503
+
+    try:
+        from linkedin.processor import process_pending_drafts
+        from linkedin.sqlite_store import get_by_id, requeue_draft
+    except Exception as exc:
+        logger.warning("Dashboard LinkedIn retry imports failed: %s", exc)
+        return {"error": f"Failed to load LinkedIn processor: {exc}"}, 500
+
+    try:
+        requeued = requeue_draft(str(row.get("id", "")), clear_artefacts=True)
+        if requeued is None:
+            return {"error": "LinkedIn draft not found."}, 404
+        process_pending_drafts(notes_manager, notifier=None)
+    except Exception as exc:
+        logger.warning("Dashboard LinkedIn retry failed for %s: %s", row.get("id", ""), exc)
+        return {"error": f"Failed to re-trigger post: {exc}"}, 500
+
+    updated = get_by_id(str(row.get("id", ""))) or row
+    payload, status_code = _linkedin_editor_payload(str(updated.get("id", "")))
+    if status_code != 200:
+        return payload, status_code
+
+    final_status = str(updated.get("status", "") or "")
+    if final_status == "ready":
+        payload["detail"] = "Post re-triggered and saved to Obsidian."
+    elif final_status == "failed":
+        payload["detail"] = f"Post re-triggered but failed again: {str(updated.get('last_error', '')).strip() or 'unknown error'}"
+    else:
+        payload["detail"] = "Post re-triggered and queued for processing."
+    return payload, 200
 
 
 def collect_snapshot(
@@ -1748,14 +2075,14 @@ def _render_linkedin_content(snapshot: DashboardSnapshot) -> str:
     drafts = snapshot.linkedin_drafts
 
     if not drafts:
-        empty_html = """
-        <div class="li-empty">
+        list_html = """
+        <div class="li-empty li-empty--list">
           <span class="li-tag">LINKEDIN COMPOSER</span>
           <p class="li-empty-text">No drafts yet.<br>
           Send <code>/linkedin &lt;text or URL&gt;</code> from Telegram to create your first draft.</p>
         </div>"""
     else:
-        STATUS_ICON = {"ready": "✅", "pending_generation": "⏳", "failed": "❌"}
+        STATUS_ICON = {"ready": "✅", "pending_generation": "⏳", "failed": "❌", "needs_attention": "⚠️"}
         cards_html = ""
         for item in drafts:
             tags_html = " ".join(
@@ -1776,30 +2103,38 @@ def _render_linkedin_content(snapshot: DashboardSnapshot) -> str:
                 f'<span class="li-inline-tag li-inline-tag--warn">ATTEMPTS {item.attempts}</span>'
                 if item.attempts > 1 else ""
             )
+            snippet_html = (
+                f'<p class="li-card-snippet" data-linkedin-card-snippet>{html.escape(item.hook)}</p>'
+                if item.hook else '<p class="li-card-snippet" data-linkedin-card-snippet hidden></p>'
+            )
+            open_cta = "Open post" if item.obsidian_path else "Awaiting note"
             cards_html += f"""
-            <div class="li-card li-card--{html.escape(item.status)}">
+            <button type="button" class="li-card li-card--{html.escape(item.status)}{' li-card--disabled' if not item.obsidian_path else ''}" data-linkedin-open="{html.escape(item.lookup_id)}"{' disabled aria-disabled="true"' if not item.obsidian_path else ''}>
               <div class="li-card-header">
                 <div class="li-card-meta">
                   <span class="li-tag">{html.escape(item.pillar_label.upper() or "LINKEDIN")}</span>
                   {parent_html}
                   {attempts_html}
                 </div>
-                <div class="li-card-status">{status_icon} <span class="li-status-label">{status_label}</span></div>
+                <div class="li-card-status" data-linkedin-card-status>{status_icon} <span class="li-status-label" data-linkedin-card-status-label>{status_label}</span></div>
               </div>
-              <h3 class="li-headline">{html.escape(item.headline)}</h3>
+              <h3 class="li-headline" data-linkedin-card-headline>{html.escape(item.headline)}</h3>
+              {snippet_html}
               <div class="li-meta-row">
                 <span class="li-meta-item">VOICE <span class="li-meta-value">{html.escape(item.voice.upper())}</span></span>
                 <span class="li-meta-sep">·</span>
                 <span class="li-meta-item">SOURCE <span class="li-meta-value">{html.escape(item.source_type.upper())}</span></span>
                 <span class="li-meta-sep">·</span>
                 {obsidian_html}
-                <span class="li-meta-sep">·</span>
-                <span class="li-meta-item li-meta-ts">{html.escape(item.created_at)}</span>
               </div>
               {f'<div class="li-source-label">Source: {html.escape(item.source_label)}</div>' if item.source_label else ""}
               <div class="li-tags-row">{tags_html}</div>
-            </div>"""
-        empty_html = f'<div class="li-grid">{cards_html}</div>'
+              <div class="li-card-footer">
+                <span class="li-meta-item li-meta-ts">{html.escape(item.updated_at or item.created_at)}</span>
+                <span class="li-card-open">{html.escape(open_cta)}</span>
+              </div>
+            </button>"""
+        list_html = f'<div class="li-list">{cards_html}</div>'
 
     return f"""
     <style>
@@ -1812,6 +2147,9 @@ def _render_linkedin_content(snapshot: DashboardSnapshot) -> str:
         border: 1px solid rgba(255,255,255,0.08);
         border-radius: 4px;
         padding: 32px;
+      }}
+      .li-root [hidden] {{
+        display: none !important;
       }}
       .li-section-header {{
         display: flex;
@@ -1873,18 +2211,41 @@ def _render_linkedin_content(snapshot: DashboardSnapshot) -> str:
         grid-template-columns: 1fr;
         gap: 16px;
       }}
-      @media (min-width: 1100px) {{
-        .li-grid {{ grid-template-columns: repeat(2, 1fr); }}
+      .li-workspace {{
+        display: grid;
+        grid-template-columns: minmax(300px, 420px) minmax(0, 1fr);
+        gap: 20px;
+        align-items: start;
+      }}
+      .li-list {{
+        display: grid;
+        gap: 14px;
+      }}
+      @media (max-width: 1080px) {{
+        .li-workspace {{ grid-template-columns: 1fr; }}
       }}
       .li-card {{
+        appearance: none;
+        width: 100%;
+        text-align: left;
+        cursor: pointer;
         background: #1c1f24;
         border: 1px solid rgba(255,255,255,0.08);
         border-radius: 4px;
         padding: 24px;
         transition: border-color 0.15s;
+        color: inherit;
       }}
       .li-card:hover {{
         border-color: rgba(255,255,255,0.16);
+      }}
+      .li-card.is-selected {{
+        border-color: rgba(0,200,255,0.5);
+        box-shadow: inset 0 0 0 1px rgba(0,200,255,0.35);
+      }}
+      .li-card--disabled {{
+        cursor: default;
+        opacity: 0.72;
       }}
       .li-card-header {{
         display: flex;
@@ -1923,6 +2284,12 @@ def _render_linkedin_content(snapshot: DashboardSnapshot) -> str:
         letter-spacing: -0.1px;
         margin: 0 0 12px 0;
         line-height: 1.4;
+      }}
+      .li-card-snippet {{
+        margin: 0 0 14px 0;
+        font-size: 13px;
+        line-height: 1.65;
+        color: #b8bdc6;
       }}
       .li-meta-row {{
         display: flex;
@@ -1993,6 +2360,165 @@ def _render_linkedin_content(snapshot: DashboardSnapshot) -> str:
         gap: 4px;
         margin-top: 4px;
       }}
+      .li-card-footer {{
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-top: 16px;
+      }}
+      .li-card-open {{
+        font-family: ui-monospace, SFMono-Regular, Roboto Mono, Menlo, Monaco, Courier New, monospace;
+        font-size: 10px;
+        letter-spacing: 1.1px;
+        text-transform: uppercase;
+        color: #00c8ff;
+      }}
+      .li-editor-shell {{
+        min-height: 620px;
+        background: #111418;
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 4px;
+        padding: 24px;
+      }}
+      .li-editor {{
+        display: grid;
+        gap: 16px;
+      }}
+      .li-editor-header {{
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 16px;
+        padding-bottom: 16px;
+        border-bottom: 1px solid rgba(255,255,255,0.06);
+      }}
+      .li-editor-kicker {{
+        font-family: ui-monospace, SFMono-Regular, Roboto Mono, Menlo, Monaco, Courier New, monospace;
+        font-size: 10px;
+        letter-spacing: 1.2px;
+        text-transform: uppercase;
+        color: #7a808c;
+        margin-bottom: 8px;
+      }}
+      .li-editor-title {{
+        margin: 0 0 8px 0;
+        font-size: 24px;
+        font-weight: 590;
+        line-height: 1.3;
+        color: #f0f1f3;
+      }}
+      .li-editor-meta {{
+        color: #7a808c;
+        font-size: 12px;
+        line-height: 1.6;
+      }}
+      .li-editor-controls {{
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        justify-content: flex-end;
+      }}
+      .li-mode-btn,
+      .li-save-btn {{
+        appearance: none;
+        border: 1px solid rgba(255,255,255,0.14);
+        background: transparent;
+        color: #b8bdc6;
+        padding: 8px 12px;
+        font: inherit;
+        cursor: pointer;
+      }}
+      .li-mode-btn.is-active {{
+        border-color: rgba(0,200,255,0.45);
+        color: #00c8ff;
+        background: rgba(0,200,255,0.08);
+      }}
+      .li-save-btn {{
+        border-color: rgba(0,200,255,0.35);
+        color: #00c8ff;
+      }}
+      .li-save-btn[disabled],
+      .li-mode-btn[disabled] {{
+        opacity: 0.5;
+        cursor: not-allowed;
+      }}
+      .li-editor-status {{
+        font-size: 12px;
+        color: #7a808c;
+        min-height: 20px;
+      }}
+      .li-editor-status.is-success {{ color: #22c55e; }}
+      .li-editor-status.is-error {{ color: #ff7b7b; }}
+      .li-editor-textarea {{
+        width: 100%;
+        min-height: 420px;
+        resize: vertical;
+        border: 1px solid rgba(255,255,255,0.12);
+        background: #0d1014;
+        color: #f0f1f3;
+        padding: 18px;
+        font: 14px/1.7 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      }}
+      .li-editor-preview {{
+        min-height: 420px;
+        border: 1px solid rgba(255,255,255,0.12);
+        background: #0d1014;
+        color: #e5e7eb;
+        padding: 24px;
+        overflow-wrap: anywhere;
+      }}
+      .li-editor-preview h1,
+      .li-editor-preview h2,
+      .li-editor-preview h3,
+      .li-editor-preview h4,
+      .li-editor-preview h5,
+      .li-editor-preview h6 {{
+        color: #f8fafc;
+        line-height: 1.3;
+        margin: 0 0 14px 0;
+      }}
+      .li-editor-preview p,
+      .li-editor-preview li,
+      .li-editor-preview blockquote {{
+        font-size: 15px;
+        line-height: 1.8;
+      }}
+      .li-editor-preview p,
+      .li-editor-preview ul,
+      .li-editor-preview ol,
+      .li-editor-preview pre,
+      .li-editor-preview blockquote {{
+        margin: 0 0 16px 0;
+      }}
+      .li-editor-preview ul,
+      .li-editor-preview ol {{
+        padding-left: 24px;
+      }}
+      .li-editor-preview blockquote {{
+        padding-left: 16px;
+        border-left: 2px solid rgba(0,200,255,0.35);
+        color: #cbd5e1;
+      }}
+      .li-editor-preview pre,
+      .li-editor-preview code {{
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      }}
+      .li-editor-preview pre {{
+        padding: 16px;
+        background: rgba(255,255,255,0.04);
+        border: 1px solid rgba(255,255,255,0.08);
+        overflow-x: auto;
+      }}
+      .li-editor-preview code {{
+        background: rgba(255,255,255,0.08);
+        padding: 2px 5px;
+      }}
+      .li-editor-preview hr {{
+        border: 0;
+        border-top: 1px solid rgba(255,255,255,0.12);
+        margin: 22px 0;
+      }}
       .li-warning {{
         margin-top: 10px;
         font-size: 12px;
@@ -2005,6 +2531,10 @@ def _render_linkedin_content(snapshot: DashboardSnapshot) -> str:
       .li-empty {{
         text-align: center;
         padding: 64px 32px;
+      }}
+      .li-empty--list {{
+        min-height: 240px;
+        border: 1px dashed rgba(255,255,255,0.08);
       }}
       .li-empty-text {{
         color: #7a808c;
@@ -2026,7 +2556,36 @@ def _render_linkedin_content(snapshot: DashboardSnapshot) -> str:
         <h2 class="li-section-title">LinkedIn Composer</h2>
         <span class="li-count">{len(drafts)} DRAFT{'S' if len(drafts) != 1 else ''} · JARVIS/PR/LINKEDIN COMPOSER</span>
       </div>
-      {empty_html}
+      <div class="li-workspace" data-linkedin-root>
+        <div class="li-list-shell">
+          {list_html}
+        </div>
+        <div class="li-editor-shell">
+          <div class="li-empty" data-linkedin-empty>
+            <span class="li-tag">MARKDOWN WORKSPACE</span>
+            <p class="li-empty-text">Click a post to open it here.<br>
+            Switch between raw Markdown and preview, then save back to Obsidian.</p>
+          </div>
+          <div class="li-editor" data-linkedin-panel hidden>
+            <div class="li-editor-header">
+              <div>
+                <div class="li-editor-kicker">POST EDITOR</div>
+                <h3 class="li-editor-title" data-linkedin-title>Untitled draft</h3>
+                <div class="li-editor-meta" data-linkedin-meta>Open a draft to inspect or edit its markdown.</div>
+              </div>
+              <div class="li-editor-controls">
+                <button type="button" class="li-mode-btn is-active" data-linkedin-mode="preview">Preview</button>
+                <button type="button" class="li-mode-btn" data-linkedin-mode="edit">Edit</button>
+                <button type="button" class="li-mode-btn" data-linkedin-retry>Re-trigger</button>
+                <button type="button" class="li-save-btn" data-linkedin-save disabled>Save</button>
+              </div>
+            </div>
+            <div class="li-editor-status" data-linkedin-status></div>
+            <textarea class="li-editor-textarea" data-linkedin-editor hidden spellcheck="false"></textarea>
+            <div class="li-editor-preview" data-linkedin-preview></div>
+          </div>
+        </div>
+      </div>
     </section>
     """
 
@@ -2049,6 +2608,18 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
     initial_summary = _render_summary_panel(snapshot)
     initial_tab_content = _render_tab_content(snapshot, active_tab)
     logo_svg = _load_dashboard_logo_svg()
+    runtime_info = _dashboard_runtime_info()
+    runtime_summary_parts = [f"Updated {snapshot.generated_at}"]
+    if runtime_info.get("runtimeCommit"):
+        runtime_summary_parts.append(f"Runtime {runtime_info['runtimeCommit']}")
+    if runtime_info.get("repoCommit"):
+        runtime_summary_parts.append(f"Repo {runtime_info['repoCommit']}")
+    runtime_summary_parts.append("Docs")
+    runtime_warning = (
+        f"Dashboard process is stale. Runtime {runtime_info['runtimeCommit']} is older than repo {runtime_info['repoCommit']}. Restart the dashboard to load the latest code."
+        if runtime_info.get("runtimeStale")
+        else ""
+    )
 
     return f"""<!doctype html>
 <html lang=\"en\">
@@ -2310,6 +2881,24 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
       margin-top: 4px;
       word-break: break-word;
     }}
+    .header-meta {{
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 10px;
+      text-align: right;
+    }}
+    .runtime-banner {{
+      display: block;
+      border: 1px solid rgba(255, 191, 71, 0.35);
+      background: rgba(255, 191, 71, 0.08);
+      color: #ffbf47;
+      padding: 10px 12px;
+      margin-bottom: 16px;
+    }}
+    .runtime-banner[hidden] {{
+      display: none;
+    }}
     @media (max-width: 1100px) {{
       .wrap {{
         padding: 20px;
@@ -2324,6 +2913,10 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
       header {{
         align-items: flex-start;
         flex-direction: column;
+      }}
+      .header-meta {{
+        align-items: flex-start;
+        text-align: left;
       }}
       .wrap {{
         padding: 16px;
@@ -2343,8 +2936,11 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
           <h1>Marvis Dashboard</h1>
         </div>
       </div>
-      <div class=\"subtle\"><a href=\"/docs\">Docs</a> · Updated {html.escape(snapshot.generated_at)}</div>
+      <div class=\"header-meta\">
+        <div class=\"subtle\" id=\"runtime-meta\">{html.escape(" · ".join(runtime_summary_parts[:-1]))} · <a href=\"/docs\">{html.escape(runtime_summary_parts[-1])}</a></div>
+      </div>
     </header>
+    <div class=\"runtime-banner\" id=\"runtime-banner\"{' hidden' if not runtime_warning else ''}>{html.escape(runtime_warning)}</div>
     <nav class=\"nav\">
       {_tab_nav(active_tab)}
     </nav>
@@ -2366,11 +2962,23 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
       const tabContent = document.getElementById("tab-content");
       const cache = new Map();
       const initialTab = {json.dumps(active_tab)};
+      const initialRuntimeInfo = {json.dumps(runtime_info)};
       let activeTab = initialTab;
       let summaryRequest = null;
       let currentTabRequest = null;
       let currentTabIntervalId = null;
+      let versionCheckRequest = null;
       const pendingControllers = new Set();
+      const runtimeState = {{
+        info: initialRuntimeInfo,
+      }};
+      const linkedinState = {{
+        selectedDraftId: null,
+        mode: "preview",
+        detailCache: new Map(),
+        dirtyContent: new Map(),
+        saveInFlight: false,
+      }};
 
       cache.set(initialTab, tabContent.innerHTML);
 
@@ -2380,6 +2988,14 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
 
       function fragmentUrl(path) {{
         return new URL(path, window.location.href).toString();
+      }}
+
+      function runtimeMetaElement() {{
+        return document.getElementById("runtime-meta");
+      }}
+
+      function runtimeBannerElement() {{
+        return document.getElementById("runtime-banner");
       }}
 
       function trackController(controller) {{
@@ -2443,11 +3059,641 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
         return await response.text();
       }}
 
+      async function fetchJson(path, options = {{}}) {{
+        const response = await window.fetch(fragmentUrl(path), {{
+          credentials: "same-origin",
+          headers: {{
+            "X-Requested-With": "fetch",
+            ...(options.headers || {{}}),
+          }},
+          ...options,
+        }});
+        const text = await response.text();
+        let payload = {{}};
+        if (text) {{
+          try {{
+            payload = JSON.parse(text);
+          }} catch (error) {{
+            throw new Error("Server returned invalid JSON.");
+          }}
+        }}
+        if (!response.ok) {{
+          throw new Error(payload.error || ("Request failed: " + response.status));
+        }}
+        return payload;
+      }}
+
+      function formatRuntimeMeta(info) {{
+        const parts = [];
+        if (info.serverStartedAt) {{
+          parts.push("Updated " + String(info.serverStartedAt));
+        }}
+        if (info.runtimeCommit) {{
+          parts.push("Runtime " + String(info.runtimeCommit));
+        }}
+        if (info.repoCommit) {{
+          parts.push("Repo " + String(info.repoCommit));
+        }}
+        return parts.join(" · ");
+      }}
+
+      function runtimeWarningMessage(info) {{
+        if (!info || !info.runtimeStale) {{
+          return "";
+        }}
+        return "Dashboard process is stale. Runtime " + String(info.runtimeCommit || "unknown") + " is older than repo " + String(info.repoCommit || "unknown") + ". Restart the dashboard to load the latest code.";
+      }}
+
+      function applyRuntimeInfo(info) {{
+        runtimeState.info = info || {{}};
+        const meta = runtimeMetaElement();
+        const banner = runtimeBannerElement();
+        if (meta) {{
+          const docsLink = '<a href="/docs">Docs</a>';
+          const metaText = formatRuntimeMeta(runtimeState.info);
+          meta.innerHTML = metaText ? escapeHtml(metaText) + " · " + docsLink : docsLink;
+        }}
+        if (banner) {{
+          const warning = runtimeWarningMessage(runtimeState.info);
+          banner.textContent = warning;
+          banner.hidden = !warning;
+        }}
+      }}
+
+      async function refreshRuntimeInfo(options = {{}}) {{
+        if (document.visibilityState !== "visible" || versionCheckRequest) {{
+          return versionCheckRequest;
+        }}
+        const forceRefresh = Boolean(options.forceRefresh);
+        const controller = trackController(new AbortController());
+        versionCheckRequest = (async () => {{
+          try {{
+            const info = await fetchJson("/api/version", {{ signal: controller.signal }});
+            const previous = runtimeState.info || {{}};
+            const serverChanged =
+              previous.serverStartedAt !== info.serverStartedAt ||
+              previous.runtimeCommit !== info.runtimeCommit;
+            const repoChanged = previous.repoCommit !== info.repoCommit;
+            applyRuntimeInfo(info);
+            if ((serverChanged || repoChanged || forceRefresh) && !hasUnsavedLinkedInChanges()) {{
+              cache.clear();
+              linkedinState.detailCache.clear();
+              await refreshSummary();
+              await loadTab(activeTab, true);
+            }}
+          }} finally {{
+            untrackController(controller);
+            versionCheckRequest = null;
+          }}
+        }})();
+        try {{
+          await versionCheckRequest;
+        }} catch (error) {{
+          if (error.name !== "AbortError") {{
+            console.error(error);
+          }}
+        }}
+      }}
+
+      function linkedInRoot() {{
+        return tabContent.querySelector("[data-linkedin-root]");
+      }}
+
+      function linkedInEmpty() {{
+        return tabContent.querySelector("[data-linkedin-empty]");
+      }}
+
+      function linkedInPanel() {{
+        return tabContent.querySelector("[data-linkedin-panel]");
+      }}
+
+      function linkedInEditor() {{
+        return tabContent.querySelector("[data-linkedin-editor]");
+      }}
+
+      function linkedInPreview() {{
+        return tabContent.querySelector("[data-linkedin-preview]");
+      }}
+
+      function linkedInTitle() {{
+        return tabContent.querySelector("[data-linkedin-title]");
+      }}
+
+      function linkedInMeta() {{
+        return tabContent.querySelector("[data-linkedin-meta]");
+      }}
+
+      function linkedInStatus() {{
+        return tabContent.querySelector("[data-linkedin-status]");
+      }}
+
+      function linkedInSaveButton() {{
+        return tabContent.querySelector("[data-linkedin-save]");
+      }}
+
+      function linkedInRetryButton() {{
+        return tabContent.querySelector("[data-linkedin-retry]");
+      }}
+
+      function linkedInCardById(draftId) {{
+        for (const button of tabContent.querySelectorAll("[data-linkedin-open]")) {{
+          if (button.dataset.linkedinOpen === draftId) {{
+            return button;
+          }}
+        }}
+        return null;
+      }}
+
+      function syncLinkedInCard(detail) {{
+        if (!detail || !detail.draftId) {{
+          return;
+        }}
+        const card = linkedInCardById(detail.draftId);
+        if (!card) {{
+          return;
+        }}
+        const status = detail.status || detail.rawStatus || "";
+        const statusLabel = status ? String(status).replace(/_/g, " ").toUpperCase() : "";
+        const statusIcon = {{
+          ready: "✅",
+          pending_generation: "⏳",
+          failed: "❌",
+          needs_attention: "⚠️",
+        }}[status] || "·";
+        for (const name of ["ready", "pending_generation", "failed", "needs_attention"]) {{
+          card.classList.remove("li-card--" + name);
+        }}
+        if (status) {{
+          card.classList.add("li-card--" + status);
+        }}
+        const statusNode = card.querySelector("[data-linkedin-card-status]");
+        if (statusNode) {{
+          statusNode.innerHTML = statusIcon + ' <span class="li-status-label" data-linkedin-card-status-label>' + escapeHtml(statusLabel) + "</span>";
+        }}
+        const headlineNode = card.querySelector("[data-linkedin-card-headline]");
+        if (headlineNode && detail.headline) {{
+          headlineNode.textContent = detail.headline;
+        }}
+        const snippetNode = card.querySelector("[data-linkedin-card-snippet]");
+        if (snippetNode) {{
+          const excerpt = String(detail.excerpt || "").trim();
+          snippetNode.textContent = excerpt;
+          snippetNode.hidden = !excerpt;
+        }}
+      }}
+
+      function hasUnsavedLinkedInChanges() {{
+        return Boolean(
+          activeTab === "linkedin" &&
+          linkedinState.selectedDraftId &&
+          linkedinState.dirtyContent.has(linkedinState.selectedDraftId)
+        );
+      }}
+
+      function setLinkedInStatus(message, tone = "") {{
+        const element = linkedInStatus();
+        if (!element) {{
+          return;
+        }}
+        element.textContent = message || "";
+        element.classList.remove("is-success", "is-error");
+        if (tone === "success") {{
+          element.classList.add("is-success");
+        }} else if (tone === "error") {{
+          element.classList.add("is-error");
+        }}
+      }}
+
+      function escapeHtml(value) {{
+        return String(value || "")
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;")
+          .replace(/'/g, "&#39;");
+      }}
+
+      function stripMarkdownFrontmatter(text) {{
+        let normalized = String(text || "").replace(/\\r\\n/g, "\\n").replace(/^\\uFEFF/, "").trimStart();
+        const frontmatterPattern = /^---\\n[\\s\\S]*?\\n---(?:\\n|$)/;
+        while (frontmatterPattern.test(normalized)) {{
+          normalized = normalized.replace(frontmatterPattern, "").trimStart();
+        }}
+        return normalized;
+      }}
+
+      function renderMarkdownInline(text) {{
+        let rendered = escapeHtml(text);
+        rendered = rendered.replace(/`([^`]+)`/g, "<code>$1</code>");
+        rendered = rendered.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+        rendered = rendered.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+        rendered = rendered.replace(/__([^_]+)__/g, "<strong>$1</strong>");
+        rendered = rendered.replace(/(^|\W)\*([^*]+)\*(?=\W|$)/g, "$1<em>$2</em>");
+        rendered = rendered.replace(/(^|\W)_([^_]+)_(?=\W|$)/g, "$1<em>$2</em>");
+        return rendered;
+      }}
+
+      function renderMarkdown(markdown) {{
+        const source = stripMarkdownFrontmatter(markdown);
+        if (!source.trim()) {{
+          return '<p class="muted">Nothing to preview yet.</p>';
+        }}
+
+        const lines = source.split("\\n");
+        const blocks = [];
+        let paragraph = [];
+        let listType = null;
+        let listItems = [];
+        let quoteLines = [];
+        let inCodeBlock = false;
+        let codeLines = [];
+
+        function flushParagraph() {{
+          if (!paragraph.length) {{
+            return;
+          }}
+          blocks.push("<p>" + renderMarkdownInline(paragraph.join(" ")) + "</p>");
+          paragraph = [];
+        }}
+
+        function flushList() {{
+          if (!listType || !listItems.length) {{
+            listType = null;
+            listItems = [];
+            return;
+          }}
+          blocks.push(
+            "<" + listType + ">" +
+            listItems.map((item) => "<li>" + item + "</li>").join("") +
+            "</" + listType + ">"
+          );
+          listType = null;
+          listItems = [];
+        }}
+
+        function flushQuote() {{
+          if (!quoteLines.length) {{
+            return;
+          }}
+          blocks.push(
+            "<blockquote>" +
+            quoteLines.map((line) => "<p>" + renderMarkdownInline(line) + "</p>").join("") +
+            "</blockquote>"
+          );
+          quoteLines = [];
+        }}
+
+        function flushCodeBlock() {{
+          if (!codeLines.length) {{
+            blocks.push("<pre><code></code></pre>");
+          }} else {{
+            blocks.push("<pre><code>" + escapeHtml(codeLines.join("\\n")) + "</code></pre>");
+          }}
+          codeLines = [];
+        }}
+
+        for (const rawLine of lines) {{
+          const trimmed = rawLine.trim();
+
+          if (inCodeBlock) {{
+            if (trimmed.startsWith("```")) {{
+              flushCodeBlock();
+              inCodeBlock = false;
+            }} else {{
+              codeLines.push(rawLine);
+            }}
+            continue;
+          }}
+
+          if (trimmed.startsWith("```")) {{
+            flushParagraph();
+            flushList();
+            flushQuote();
+            inCodeBlock = true;
+            codeLines = [];
+            continue;
+          }}
+
+          if (!trimmed) {{
+            flushParagraph();
+            flushList();
+            flushQuote();
+            continue;
+          }}
+
+          const headingMatch = trimmed.match(/^(#{{1,6}})\s+(.*)$/);
+          if (headingMatch) {{
+            flushParagraph();
+            flushList();
+            flushQuote();
+            const level = headingMatch[1].length;
+            blocks.push("<h" + level + ">" + renderMarkdownInline(headingMatch[2]) + "</h" + level + ">");
+            continue;
+          }}
+
+          if (/^(-{{3,}}|\*{{3,}}|_{{3,}})$/.test(trimmed)) {{
+            flushParagraph();
+            flushList();
+            flushQuote();
+            blocks.push("<hr>");
+            continue;
+          }}
+
+          const bulletMatch = rawLine.match(/^\s*[-*+]\s+(.*)$/);
+          if (bulletMatch) {{
+            flushParagraph();
+            flushQuote();
+            if (listType !== "ul") {{
+              flushList();
+              listType = "ul";
+            }}
+            listItems.push(renderMarkdownInline(bulletMatch[1]));
+            continue;
+          }}
+
+          const orderedMatch = rawLine.match(/^\s*\d+\.\s+(.*)$/);
+          if (orderedMatch) {{
+            flushParagraph();
+            flushQuote();
+            if (listType !== "ol") {{
+              flushList();
+              listType = "ol";
+            }}
+            listItems.push(renderMarkdownInline(orderedMatch[1]));
+            continue;
+          }}
+
+          const quoteMatch = rawLine.match(/^\s*>\s?(.*)$/);
+          if (quoteMatch) {{
+            flushParagraph();
+            flushList();
+            quoteLines.push(quoteMatch[1]);
+            continue;
+          }}
+
+          paragraph.push(trimmed);
+        }}
+
+        flushParagraph();
+        flushList();
+        flushQuote();
+        if (inCodeBlock) {{
+          flushCodeBlock();
+        }}
+        return blocks.join("");
+      }}
+
+      function highlightLinkedInSelection() {{
+        const selectedId = linkedinState.selectedDraftId;
+        for (const button of tabContent.querySelectorAll("[data-linkedin-open]")) {{
+          button.classList.toggle("is-selected", button.dataset.linkedinOpen === selectedId);
+        }}
+      }}
+
+      function currentLinkedInValue() {{
+        const editor = linkedInEditor();
+        if (editor) {{
+          return editor.value;
+        }}
+        if (linkedinState.selectedDraftId && linkedinState.dirtyContent.has(linkedinState.selectedDraftId)) {{
+          return linkedinState.dirtyContent.get(linkedinState.selectedDraftId) || "";
+        }}
+        const detail = linkedinState.selectedDraftId ? linkedinState.detailCache.get(linkedinState.selectedDraftId) : null;
+        return detail ? detail.content || "" : "";
+      }}
+
+      function setLinkedInMode(mode) {{
+        linkedinState.mode = mode === "edit" ? "edit" : "preview";
+        const editor = linkedInEditor();
+        const preview = linkedInPreview();
+        if (editor) {{
+          editor.hidden = linkedinState.mode !== "edit";
+        }}
+        if (preview) {{
+          preview.hidden = linkedinState.mode !== "preview";
+          preview.innerHTML = renderMarkdown(currentLinkedInValue());
+        }}
+        for (const button of tabContent.querySelectorAll("[data-linkedin-mode]")) {{
+          button.classList.toggle("is-active", button.dataset.linkedinMode === linkedinState.mode);
+        }}
+      }}
+
+      function applyLinkedInDetail(detail) {{
+        const empty = linkedInEmpty();
+        const panel = linkedInPanel();
+        const title = linkedInTitle();
+        const meta = linkedInMeta();
+        const editor = linkedInEditor();
+        const preview = linkedInPreview();
+        const saveButton = linkedInSaveButton();
+        const retryButton = linkedInRetryButton();
+        if (!panel || !editor || !preview || !title || !meta) {{
+          return;
+        }}
+
+        linkedinState.detailCache.set(detail.draftId, detail);
+        syncLinkedInCard(detail);
+        const currentContent = linkedinState.dirtyContent.has(detail.draftId)
+          ? linkedinState.dirtyContent.get(detail.draftId)
+          : detail.content;
+
+        if (empty) {{
+          empty.hidden = true;
+        }}
+        panel.hidden = false;
+        title.textContent = detail.headline || "Untitled draft";
+        meta.textContent = [
+          detail.status ? String(detail.status).replace(/_/g, " ") : "",
+          detail.voice || "",
+          detail.pillarLabel || "",
+          detail.obsidianPath || "",
+          detail.modifiedAt || "",
+        ].filter(Boolean).join(" · ");
+        editor.value = currentContent || "";
+        preview.innerHTML = renderMarkdown(currentContent || "");
+        if (saveButton) {{
+          saveButton.disabled = !detail.editable || linkedinState.saveInFlight;
+        }}
+        if (retryButton) {{
+          retryButton.disabled = !detail.canRetry || linkedinState.saveInFlight;
+        }}
+        setLinkedInStatus(detail.detail || "", "");
+        setLinkedInMode(linkedinState.mode);
+        highlightLinkedInSelection();
+      }}
+
+      async function openLinkedInDraft(draftId, force = false) {{
+        if (!draftId) {{
+          return;
+        }}
+        linkedinState.selectedDraftId = draftId;
+        highlightLinkedInSelection();
+
+        const cachedDetail = linkedinState.detailCache.get(draftId);
+        if (cachedDetail) {{
+          applyLinkedInDetail(cachedDetail);
+        }} else {{
+          setLinkedInStatus("Loading post…", "");
+        }}
+        const controller = trackController(new AbortController());
+        try {{
+          const detail = await fetchJson(
+            "/api/linkedin/drafts/" + encodeURIComponent(draftId),
+            {{ signal: controller.signal }}
+          );
+          if (linkedinState.selectedDraftId === draftId) {{
+            applyLinkedInDetail(detail);
+          }}
+        }} catch (error) {{
+          if (error.name !== "AbortError") {{
+            setLinkedInStatus(error.message || "Failed to load post.", "error");
+            console.error(error);
+          }}
+        }} finally {{
+          untrackController(controller);
+        }}
+      }}
+
+      async function saveLinkedInDraft() {{
+        const draftId = linkedinState.selectedDraftId;
+        const editor = linkedInEditor();
+        const saveButton = linkedInSaveButton();
+        const retryButton = linkedInRetryButton();
+        if (!draftId || !editor || linkedinState.saveInFlight) {{
+          return;
+        }}
+
+        const detail = linkedinState.detailCache.get(draftId);
+        if (!detail || !detail.editable) {{
+          setLinkedInStatus("This draft is preview-only right now.", "error");
+          return;
+        }}
+
+        linkedinState.saveInFlight = true;
+        if (saveButton) {{
+          saveButton.disabled = true;
+        }}
+        if (retryButton) {{
+          retryButton.disabled = true;
+        }}
+        setLinkedInStatus("Saving to Obsidian…", "");
+        const controller = trackController(new AbortController());
+        try {{
+          const payload = await fetchJson(
+            "/api/linkedin/drafts/" + encodeURIComponent(draftId),
+            {{
+              method: "POST",
+              signal: controller.signal,
+              headers: {{
+                "Content-Type": "application/json",
+              }},
+              body: JSON.stringify({{ content: editor.value }}),
+            }}
+          );
+          linkedinState.detailCache.set(draftId, payload);
+          linkedinState.dirtyContent.delete(draftId);
+          applyLinkedInDetail(payload);
+          setLinkedInStatus(payload.detail || "Saved to Obsidian.", "success");
+        }} catch (error) {{
+          if (error.name !== "AbortError") {{
+            setLinkedInStatus(error.message || "Failed to save post.", "error");
+            console.error(error);
+          }}
+        }} finally {{
+          linkedinState.saveInFlight = false;
+          if (saveButton) {{
+            const latestDetail = linkedinState.detailCache.get(draftId);
+            saveButton.disabled = !latestDetail || !latestDetail.editable;
+          }}
+          if (retryButton) {{
+            const latestDetail = linkedinState.detailCache.get(draftId);
+            retryButton.disabled = !latestDetail || !latestDetail.canRetry;
+          }}
+          untrackController(controller);
+        }}
+      }}
+
+      async function retryLinkedInDraft() {{
+        const draftId = linkedinState.selectedDraftId;
+        const retryButton = linkedInRetryButton();
+        const saveButton = linkedInSaveButton();
+        if (!draftId || linkedinState.saveInFlight) {{
+          return;
+        }}
+        if (linkedinState.dirtyContent.has(draftId)) {{
+          setLinkedInStatus("Save or discard your edits before re-triggering this post.", "error");
+          return;
+        }}
+
+        linkedinState.saveInFlight = true;
+        if (retryButton) {{
+          retryButton.disabled = true;
+        }}
+        if (saveButton) {{
+          saveButton.disabled = true;
+        }}
+        setLinkedInStatus("Re-triggering post generation…", "");
+        const controller = trackController(new AbortController());
+        try {{
+          const payload = await fetchJson(
+            "/api/linkedin/drafts/" + encodeURIComponent(draftId) + "/retry",
+            {{
+              method: "POST",
+              signal: controller.signal,
+              headers: {{
+                "Content-Type": "application/json",
+              }},
+              body: JSON.stringify({{}}),
+            }}
+          );
+          linkedinState.detailCache.set(draftId, payload);
+          applyLinkedInDetail(payload);
+          void refreshCurrentTab();
+        }} catch (error) {{
+          if (error.name !== "AbortError") {{
+            setLinkedInStatus(error.message || "Failed to re-trigger post.", "error");
+            console.error(error);
+          }}
+        }} finally {{
+          linkedinState.saveInFlight = false;
+          if (retryButton) {{
+            const latestDetail = linkedinState.detailCache.get(draftId);
+            retryButton.disabled = !latestDetail || !latestDetail.canRetry;
+          }}
+          if (saveButton) {{
+            const latestDetail = linkedinState.detailCache.get(draftId);
+            saveButton.disabled = !latestDetail || !latestDetail.editable;
+          }}
+          untrackController(controller);
+        }}
+      }}
+
+      function hydrateLinkedInTab() {{
+        if (activeTab !== "linkedin" || !linkedInRoot()) {{
+          return;
+        }}
+        highlightLinkedInSelection();
+        if (linkedinState.selectedDraftId) {{
+          const detail = linkedinState.detailCache.get(linkedinState.selectedDraftId);
+          if (detail) {{
+            applyLinkedInDetail(detail);
+          }}
+          void openLinkedInDraft(linkedinState.selectedDraftId, true);
+        }}
+      }}
+
+      function hydrateActiveTab() {{
+        if (activeTab === "linkedin") {{
+          hydrateLinkedInTab();
+        }}
+      }}
+
       async function loadTab(tab, force = false) {{
         const requestedTab = allowedTabs.has(tab) ? tab : "overview";
         setActiveTab(requestedTab);
         if (!force && cache.has(requestedTab)) {{
           tabContent.innerHTML = cache.get(requestedTab);
+          hydrateActiveTab();
           return;
         }}
         tabContent.innerHTML = '<section class="panel"><div class="muted">Loading…</div></section>';
@@ -2457,6 +3703,7 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
           cache.set(requestedTab, fragment);
           if (activeTab === requestedTab) {{
             tabContent.innerHTML = fragment;
+            hydrateActiveTab();
           }}
         }} catch (error) {{
           if (activeTab === requestedTab) {{
@@ -2497,6 +3744,9 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
         if (document.visibilityState !== "visible" || currentTabRequest) {{
           return currentTabRequest;
         }}
+        if (requestedTab === "linkedin" && hasUnsavedLinkedInChanges()) {{
+          return null;
+        }}
         const controller = trackController(new AbortController());
         currentTabRequest = (async () => {{
           try {{
@@ -2504,6 +3754,7 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
             cache.set(requestedTab, fragment);
             if (activeTab === requestedTab) {{
               tabContent.innerHTML = fragment;
+              hydrateActiveTab();
             }}
           }} finally {{
             untrackController(controller);
@@ -2549,12 +3800,86 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
         }});
       }}
 
+      tabContent.addEventListener("click", (event) => {{
+        if (!(event.target instanceof Element)) {{
+          return;
+        }}
+        const openButton = event.target.closest("[data-linkedin-open]");
+        if (openButton && tabContent.contains(openButton)) {{
+          if (!openButton.disabled) {{
+            void openLinkedInDraft(openButton.dataset.linkedinOpen);
+          }}
+          return;
+        }}
+
+        const modeButton = event.target.closest("[data-linkedin-mode]");
+        if (modeButton && tabContent.contains(modeButton)) {{
+          setLinkedInMode(modeButton.dataset.linkedinMode);
+          return;
+        }}
+
+        const saveButton = event.target.closest("[data-linkedin-save]");
+        if (saveButton && tabContent.contains(saveButton)) {{
+          void saveLinkedInDraft();
+          return;
+        }}
+
+        const retryButton = event.target.closest("[data-linkedin-retry]");
+        if (retryButton && tabContent.contains(retryButton)) {{
+          void retryLinkedInDraft();
+        }}
+      }});
+
+      tabContent.addEventListener("input", (event) => {{
+        if (!(event.target instanceof Element)) {{
+          return;
+        }}
+        if (!event.target.matches("[data-linkedin-editor]")) {{
+          return;
+        }}
+        const draftId = linkedinState.selectedDraftId;
+        if (!draftId) {{
+          return;
+        }}
+        const detail = linkedinState.detailCache.get(draftId);
+        const value = event.target.value;
+        if (!detail) {{
+          return;
+        }}
+        if (value !== detail.content) {{
+          linkedinState.dirtyContent.set(draftId, value);
+          setLinkedInStatus("Unsaved changes.", "");
+        }} else {{
+          linkedinState.dirtyContent.delete(draftId);
+          setLinkedInStatus(detail.detail || "Loaded from Obsidian.", "");
+        }}
+        const preview = linkedInPreview();
+        if (preview) {{
+          preview.innerHTML = renderMarkdown(value);
+        }}
+      }});
+
+      tabContent.addEventListener("keydown", (event) => {{
+        if (!(event.target instanceof Element)) {{
+          return;
+        }}
+        if (
+          event.target.matches("[data-linkedin-editor]") &&
+          (event.metaKey || event.ctrlKey) &&
+          String(event.key || "").toLowerCase() === "s"
+        ) {{
+          event.preventDefault();
+          void saveLinkedInDraft();
+        }}
+      }});
+
       window.addEventListener("popstate", () => {{
         const params = new URLSearchParams(window.location.search);
         const tab = params.get("tab") || "overview";
         if (cache.has(tab)) {{
           setActiveTab(tab, false);
           tabContent.innerHTML = cache.get(tab);
+          hydrateActiveTab();
           return;
         }}
         void loadTab(tab, false);
@@ -2567,6 +3892,7 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
           abortPendingRequests();
           return;
         }}
+        void refreshRuntimeInfo();
         void refreshSummary();
         void refreshCurrentTab();
       }});
@@ -2575,10 +3901,13 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
         if (document.visibilityState !== "visible") {{
           return;
         }}
+        void refreshRuntimeInfo();
         void refreshSummary();
       }}, 10000);
 
       scheduleCurrentTabRefresh();
+      applyRuntimeInfo(initialRuntimeInfo);
+      hydrateActiveTab();
 
       window.addEventListener("unload", () => {{
         if (currentTabIntervalId !== null) {{
@@ -2622,8 +3951,14 @@ def _snapshot_for_tab(tab: str) -> DashboardSnapshot:
     )
 
 
-def _write_response(handler: BaseHTTPRequestHandler, body: bytes, content_type: str) -> None:
-    handler.send_response(200)
+def _write_response(
+    handler: BaseHTTPRequestHandler,
+    body: bytes,
+    content_type: str,
+    *,
+    status_code: int = 200,
+) -> None:
+    handler.send_response(status_code)
     handler.send_header("Content-Type", content_type)
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
@@ -2656,6 +3991,23 @@ class DashboardHandler(BaseHTTPRequestHandler):
             _write_response(self, body, "application/json; charset=utf-8")
             return
 
+        if parsed.path == "/api/version":
+            body = json.dumps(_dashboard_runtime_info()).encode("utf-8")
+            _write_response(self, body, "application/json; charset=utf-8")
+            return
+
+        if parsed.path.startswith("/api/linkedin/drafts/"):
+            draft_id_prefix = parsed.path.rsplit("/", 1)[-1]
+            payload, status_code = _linkedin_editor_payload(draft_id_prefix)
+            body = json.dumps(payload).encode("utf-8")
+            _write_response(
+                self,
+                body,
+                "application/json; charset=utf-8",
+                status_code=status_code,
+            )
+            return
+
         if parsed.path == "/fragment/summary":
             snapshot = collect_snapshot()
             body = _render_summary_panel(snapshot).encode("utf-8")
@@ -2670,6 +4022,48 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
 
         self.send_error(404, "Not Found")
+
+    def do_POST(self) -> None:  # noqa: N802
+        parsed = urlparse(self.path)
+        if not parsed.path.startswith("/api/linkedin/drafts/"):
+            self.send_error(404, "Not Found")
+            return
+
+        retry_request = parsed.path.endswith("/retry")
+        draft_id_prefix = parsed.path.split("/api/linkedin/drafts/", 1)[1].strip("/")
+        if retry_request:
+            draft_id_prefix = draft_id_prefix[: -len("/retry")].rstrip("/")
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            content_length = 0
+        raw_body = self.rfile.read(max(0, content_length))
+        try:
+            payload = json.loads(raw_body.decode("utf-8") or "{}")
+        except Exception:
+            response = json.dumps({"error": "Request body must be valid JSON."}).encode("utf-8")
+            _write_response(
+                self,
+                response,
+                "application/json; charset=utf-8",
+                status_code=400,
+            )
+            return
+
+        if retry_request:
+            response_payload, status_code = _retry_linkedin_draft_processing(draft_id_prefix)
+        else:
+            response_payload, status_code = _save_linkedin_draft_content(
+                draft_id_prefix,
+                str(payload.get("content", "")),
+            )
+        response = json.dumps(response_payload).encode("utf-8")
+        _write_response(
+            self,
+            response,
+            "application/json; charset=utf-8",
+            status_code=status_code,
+        )
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
         logger.info("dashboard: " + format, *args)

@@ -37,14 +37,21 @@ class FakeApplication:
 class FakeMessage:
     def __init__(self):
         self.calls = []
+        self.text = "Hello"
+        self.actions = []
+        self.chat = SimpleNamespace(send_action=self._send_action)
 
     async def reply_text(self, text, parse_mode=None):
         self.calls.append((text, parse_mode))
+
+    async def _send_action(self, action):
+        self.actions.append(action)
 
 
 class FakeUpdate:
     def __init__(self):
         self.message = FakeMessage()
+        self.effective_user = SimpleNamespace(id=12345)
 
 
 class FakeProactiveBot:
@@ -58,6 +65,26 @@ class FakeProactiveBot:
             raise RuntimeError("network error")
 
 
+class FakeManagedProactiveBot:
+    instances = []
+
+    def __init__(self, token):
+        self.token = token
+        self.calls = []
+        self.events = []
+        type(self).instances.append(self)
+
+    async def __aenter__(self):
+        self.events.append("enter")
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        self.events.append("exit")
+
+    async def send_message(self, chat_id, text):
+        self.calls.append((chat_id, text))
+
+
 class TelegramBotTests(unittest.TestCase):
     def test_publish_bot_commands_registers_default_and_chat_scope(self):
         module = load_module("tested_telegram_bot", "telegram_bot/bot.py")
@@ -68,7 +95,7 @@ class TelegramBotTests(unittest.TestCase):
 
         self.assertEqual(len(app.bot.calls), 2)
         command_names = [command.command for command in app.bot.calls[0][0]]
-        self.assertEqual(command_names, ["status", "llmops", "memories", "forget", "reset"])
+        self.assertEqual(command_names, ["status", "llmops", "memories", "forget", "reset", "linkedin"])
         self.assertIsNone(app.bot.calls[0][1])
         self.assertEqual(
             app.bot.calls[1][1].chat_id,
@@ -185,6 +212,59 @@ class TelegramBotTests(unittest.TestCase):
         self.assertFalse(sent)
         self.assertEqual(fake_bot.calls, [(12345, "Attempt")])
         issue_mock.assert_called_once()
+
+    def test_proactive_notifier_uses_short_lived_bot_session_when_not_injected(self):
+        module = load_module("tested_telegram_bot_proactive_session", "telegram_bot/bot.py")
+        FakeManagedProactiveBot.instances = []
+        notifier = module.TelegramProactiveNotifier(
+            enabled=True,
+            bot_token="token-123",
+            chat_id=67890,
+            max_message_length=32,
+        )
+
+        with patch.object(module, "Bot", FakeManagedProactiveBot), patch.object(module, "record_activity"), patch.object(module, "record_issue"):
+            sent = notifier.send_message("Short lived session")
+
+        self.assertTrue(sent)
+        self.assertEqual(len(FakeManagedProactiveBot.instances), 1)
+        instance = FakeManagedProactiveBot.instances[0]
+        self.assertEqual(instance.token, "token-123")
+        self.assertEqual(instance.events, ["enter", "exit"])
+        self.assertEqual(instance.calls, [(67890, "Short lived session")])
+
+    def test_handle_message_appends_total_cost_footer(self):
+        module = load_module("tested_telegram_bot_message_costs", "telegram_bot/bot.py")
+        bot = module.TelegramBot.__new__(module.TelegramBot)
+        bot._agent = SimpleNamespace(chat=lambda text: "Hello from Marvis")
+        update = FakeUpdate()
+
+        with patch.object(
+            module,
+            "_load_llmops_summary",
+            return_value={
+                "call_count": 3,
+                "success_count": 3,
+                "error_count": 0,
+                "avg_latency_ms": 100.0,
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "total_tokens": 150,
+                "estimated_cost_usd": 0.012345,
+                "priced_call_count": 3,
+                "model_count": 1,
+                "last_recorded_at": "2026-04-09T10:00:00+00:00",
+                "top_tasks": [],
+            },
+        ), patch.object(module, "record_activity"), patch.object(module, "record_issue"), patch.object(module.logger, "info"):
+            asyncio.run(bot._handle_message(update, SimpleNamespace()))
+
+        self.assertEqual(update.message.actions, ["typing"])
+        self.assertEqual(len(update.message.calls), 1)
+        text, parse_mode = update.message.calls[0]
+        self.assertIsNone(parse_mode)
+        self.assertIn("Hello from Marvis", text)
+        self.assertIn("Total LLM cost so far: $0.0123", text)
 
 
 if __name__ == "__main__":

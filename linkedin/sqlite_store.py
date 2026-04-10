@@ -203,6 +203,51 @@ def mark_attempt_failed(draft_id: str, error: str, *, permanent: bool = False) -
             conn.close()
 
 
+def requeue_draft(draft_id: str, *, clear_artefacts: bool = False) -> Optional[dict]:
+    """Reset a draft to pending_generation so it can be processed again."""
+    with _lock:
+        conn = _get_conn()
+        try:
+            row = conn.execute(
+                "SELECT * FROM linkedin_drafts WHERE id=?", (draft_id,)
+            ).fetchone()
+            if not row:
+                return None
+
+            if clear_artefacts:
+                conn.execute(
+                    """UPDATE linkedin_drafts
+                       SET status='pending_generation',
+                           attempts=0,
+                           last_error='',
+                           last_attempt_at='',
+                           obsidian_path='',
+                           obsidian_filename='',
+                           updated_at=?
+                       WHERE id=?""",
+                    (_now(), draft_id),
+                )
+            else:
+                conn.execute(
+                    """UPDATE linkedin_drafts
+                       SET status='pending_generation',
+                           attempts=0,
+                           last_error='',
+                           last_attempt_at='',
+                           updated_at=?
+                       WHERE id=?""",
+                    (_now(), draft_id),
+                )
+            conn.commit()
+            refreshed = conn.execute(
+                "SELECT * FROM linkedin_drafts WHERE id=?", (draft_id,)
+            ).fetchone()
+            logger.info("LinkedIn draft re-queued: %s", draft_id[:8])
+            return _row_to_dict(refreshed) if refreshed else None
+        finally:
+            conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Read operations
 # ---------------------------------------------------------------------------

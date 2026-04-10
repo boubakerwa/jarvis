@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import errno
+import os
 from pathlib import Path
 from pathlib import PurePosixPath
 import re
+import tempfile
 
 
 def slugify(value: str) -> str:
@@ -58,7 +61,7 @@ class ObsidianVault:
         if path.exists():
             raise FileExistsError(f"Note already exists: {self._display_path(path)}")
 
-        path.write_text(self._compose_text(frontmatter, body), encoding="utf-8")
+        self._write_note_text(path, self._compose_text(frontmatter, body))
         return self._note_payload(path)
 
     def append_to_note(self, display_path: str, content: str) -> dict:
@@ -72,7 +75,7 @@ class ObsidianVault:
             existing += "\n"
         if not existing.endswith("\n\n"):
             existing += "\n"
-        path.write_text(existing + suffix + "\n", encoding="utf-8")
+        self._write_note_text(path, existing + suffix + "\n")
         return self._note_payload(path)
 
     def replace_note(
@@ -95,7 +98,7 @@ class ObsidianVault:
             if existing_frontmatter and not incoming_frontmatter:
                 updated = existing_frontmatter + updated.lstrip("\n")
 
-        path.write_text(updated, encoding="utf-8")
+        self._write_note_text(path, updated)
         return self._note_payload(path)
 
     def replace_text_in_note(
@@ -120,7 +123,7 @@ class ObsidianVault:
             )
 
         updated = existing.replace(find_text, replace_with, -1 if replace_all else 1)
-        path.write_text(self._normalize_note_text(updated), encoding="utf-8")
+        self._write_note_text(path, self._normalize_note_text(updated))
         payload = self._note_payload(path)
         payload["replacement_count"] = match_count if replace_all else 1
         return payload
@@ -237,6 +240,42 @@ class ObsidianVault:
             if not next_candidate.exists():
                 return next_candidate
             index += 1
+
+    def _write_note_text(self, path: Path, text: str) -> None:
+        try:
+            path.write_text(text, encoding="utf-8")
+            return
+        except OSError as exc:
+            # iCloud-backed Obsidian vaults sometimes reject in-place rewrites
+            # even when sibling temp files and atomic replaces are allowed.
+            if exc.errno not in {errno.EPERM, errno.EACCES}:
+                raise
+        self._write_note_text_atomically(path, text)
+
+    def _write_note_text_atomically(self, path: Path, text: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_name = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                dir=path.parent,
+                prefix=f".{path.stem}.",
+                suffix=f"{path.suffix}.tmp",
+                delete=False,
+            ) as tmp:
+                tmp.write(text)
+                tmp_name = tmp.name
+
+            tmp_path = Path(tmp_name)
+            if path.exists():
+                os.chmod(tmp_path, path.stat().st_mode & 0o777)
+            os.replace(tmp_path, path)
+        finally:
+            if tmp_name:
+                tmp_path = Path(tmp_name)
+                if tmp_path.exists():
+                    tmp_path.unlink()
 
     def _snippet(self, text: str, needle: str | None = None, max_chars: int = 180) -> str:
         compact = re.sub(r"\s+", " ", text).strip()

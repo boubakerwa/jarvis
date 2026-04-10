@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from notes import NotesManager, ObsidianVault
 
@@ -99,6 +100,35 @@ class NotesServiceTests(unittest.TestCase):
             self.assertEqual(result["mode"], "replace_content")
             self.assertIn('type: "project"', content)
             self.assertIn('tags: ["active"]', content)
+            self.assertIn("New body", content)
+            self.assertNotIn("Old body", content)
+
+    def test_update_note_falls_back_to_atomic_replace_when_in_place_write_is_blocked(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = NotesManager(ObsidianVault(tmpdir, root_folder="."))
+            created = manager.create_note(
+                title="Project alpha",
+                body="# Project alpha\n\nOld body",
+                folder="Projects",
+            )
+
+            note_path = Path(tmpdir) / created["path"]
+            original_write_text = Path.write_text
+
+            def flaky_write_text(path_self, data, *args, **kwargs):
+                if path_self == note_path:
+                    raise PermissionError(1, "Operation not permitted", str(path_self))
+                return original_write_text(path_self, data, *args, **kwargs)
+
+            with mock.patch.object(Path, "write_text", autospec=True, side_effect=flaky_write_text):
+                result = manager.update_note(
+                    created["path"],
+                    content="# Project alpha\n\nNew body",
+                    preserve_frontmatter=False,
+                )
+
+            content = note_path.read_text(encoding="utf-8")
+            self.assertEqual(result["mode"], "replace_content")
             self.assertIn("New body", content)
             self.assertNotIn("Old body", content)
 

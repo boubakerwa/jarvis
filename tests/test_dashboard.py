@@ -2,9 +2,11 @@ import importlib.util
 import json
 import sqlite3
 import sys
+import types
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -104,6 +106,80 @@ def create_memory_db(path: Path) -> None:
     conn.close()
 
 
+def insert_linkedin_draft(
+    path: Path,
+    *,
+    draft_id: str = "draft-12345678",
+    obsidian_path: str = "",
+    obsidian_filename: str = "",
+    status: str = "ready",
+    source_text: str = "Source text",
+) -> None:
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS linkedin_drafts (
+            id TEXT PRIMARY KEY,
+            status TEXT NOT NULL DEFAULT 'pending_generation',
+            voice TEXT NOT NULL DEFAULT 'professional',
+            origin TEXT NOT NULL DEFAULT 'telegram',
+            source_text TEXT NOT NULL,
+            source_author TEXT NOT NULL DEFAULT '',
+            source_url TEXT NOT NULL DEFAULT '',
+            source_type TEXT NOT NULL DEFAULT 'manual',
+            rewrite_of TEXT NOT NULL DEFAULT '',
+            rewrite_instructions TEXT NOT NULL DEFAULT '',
+            preset_id TEXT NOT NULL DEFAULT '',
+            pillar_id TEXT NOT NULL DEFAULT '',
+            pillar_label TEXT NOT NULL DEFAULT '',
+            library_tags TEXT NOT NULL DEFAULT '[]',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT NOT NULL DEFAULT '',
+            last_attempt_at TEXT NOT NULL DEFAULT '',
+            obsidian_path TEXT NOT NULL DEFAULT '',
+            obsidian_filename TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO linkedin_drafts (
+            id, status, voice, origin, source_text, source_author, source_url,
+            source_type, rewrite_of, rewrite_instructions, preset_id, pillar_id,
+            pillar_label, library_tags, attempts, last_error, last_attempt_at,
+            obsidian_path, obsidian_filename, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            draft_id,
+            status,
+            "professional",
+            "telegram",
+            source_text,
+            "Source Author",
+            "https://example.com/post",
+            "manual",
+            "",
+            "",
+            "",
+            "",
+            "Operator Commentary",
+            '["x-sourced"]',
+            0,
+            "",
+            "",
+            obsidian_path,
+            obsidian_filename,
+            "2026-04-09T09:00:00+00:00",
+            "2026-04-09T09:00:00+00:00",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
 def write_llm_activity(path: Path, *records: dict) -> None:
     path.write_text(
         "\n".join(json.dumps(record) for record in records) + ("\n" if records else ""),
@@ -129,6 +205,9 @@ def configure_dashboard_module(module, temp_root: Path) -> None:
     module.OPS_ACTIVITY_PATH = temp_root / "data" / "ops_activity.jsonl"
     module.OPS_ISSUES_PATH = temp_root / "data" / "ops_issues.jsonl"
     module.OPS_AUDIT_PATH = temp_root / "data" / "ops_audit.jsonl"
+    module.settings.JARVIS_DB_PATH = str(temp_root / "data" / "jarvis_memory.db")
+    module.settings.OBSIDIAN_VAULT_PATH = str(temp_root / "vault")
+    module.settings.OBSIDIAN_ROOT_FOLDER = "."
 
 
 class DashboardTests(unittest.TestCase):
@@ -193,6 +272,59 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("Updated", html)
         self.assertNotIn('http-equiv="refresh"', html)
         self.assertIn('id="tab-content"', html)
+
+    def test_dashboard_runtime_info_flags_stale_process(self):
+        with TemporaryDirectory() as td:
+            temp_root = Path(td)
+            (temp_root / "logs").mkdir()
+            (temp_root / "data").mkdir()
+            (temp_root / "logs" / "jarvis.log").write_text(
+                "2026-04-05 15:03:00 [INFO] telegram.ext.Application: Application started"
+            )
+            create_memory_db(temp_root / "data" / "jarvis_memory.db")
+            module = load_module("tested_dashboard_runtime_info", "dashboard/app.py")
+            configure_dashboard_module(module, temp_root)
+            module._RUNTIME_COMMIT = "abc123"
+            module._repo_commit_cache["value"] = ""
+            module._repo_commit_cache["fetched_at"] = 0.0
+
+            with mock.patch.object(module, "_resolve_git_commit", return_value="def456"):
+                info = module._dashboard_runtime_info()
+
+        self.assertEqual(info["runtimeCommit"], "abc123")
+        self.assertEqual(info["repoCommit"], "def456")
+        self.assertTrue(info["runtimeStale"])
+
+    def test_dashboard_shell_polls_runtime_version_and_renders_warning_banner(self):
+        with TemporaryDirectory() as td:
+            temp_root = Path(td)
+            (temp_root / "logs").mkdir()
+            (temp_root / "data").mkdir()
+            (temp_root / "logs" / "jarvis.log").write_text(
+                "2026-04-05 15:03:00 [INFO] telegram.ext.Application: Application started"
+            )
+            create_memory_db(temp_root / "data" / "jarvis_memory.db")
+            module = load_module("tested_dashboard_runtime_shell", "dashboard/app.py")
+            configure_dashboard_module(module, temp_root)
+            snapshot = module.collect_snapshot()
+
+            with mock.patch.object(
+                module,
+                "_dashboard_runtime_info",
+                return_value={
+                    "serverStartedAt": "2026-04-09T22:00:00+00:00",
+                    "runtimeCommit": "abc123",
+                    "repoCommit": "def456",
+                    "runtimeStale": True,
+                },
+            ):
+                html = module._render_snapshot(snapshot)
+
+        self.assertIn('id="runtime-banner"', html)
+        self.assertIn("Dashboard process is stale.", html)
+        self.assertIn("/api/version", html)
+        self.assertIn("refreshRuntimeInfo()", html)
+        self.assertIn("applyRuntimeInfo(initialRuntimeInfo);", html)
 
     def test_memory_tab_renders_active_memories(self):
         with TemporaryDirectory() as td:
@@ -450,6 +582,271 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("No JSON object found in model response.", html)
         self.assertIn("Email processing completed with partial failures", html)
         self.assertIn("Created task", html)
+
+    def test_linkedin_tab_renders_editor_shell_and_open_buttons(self):
+        with TemporaryDirectory() as td:
+            temp_root = Path(td)
+            (temp_root / "logs").mkdir()
+            (temp_root / "data").mkdir()
+            (temp_root / "vault" / "LinkedIn" / "2026-04").mkdir(parents=True)
+            (temp_root / "logs" / "jarvis.log").write_text(
+                "\n".join(
+                    [
+                        "2026-04-05 15:00:00 [INFO] __main__: Starting Jarvis...",
+                        "2026-04-05 15:03:00 [INFO] telegram.ext.Application: Application started",
+                    ]
+                )
+            )
+            db_path = temp_root / "data" / "jarvis_memory.db"
+            create_memory_db(db_path)
+            note_path = "LinkedIn/2026-04/test-post_draft-12.md"
+            (temp_root / "vault" / note_path).write_text(
+                "---\ncreated_at: \"2026-04-09T09:00:00+00:00\"\n---\n\n# Test Post\n\nHello markdown world.\n",
+                encoding="utf-8",
+            )
+            insert_linkedin_draft(
+                db_path,
+                draft_id="draft-12345678",
+                obsidian_path=note_path,
+                obsidian_filename="test_post_draft-12",
+            )
+
+            module = load_module("tested_dashboard_linkedin_shell", "dashboard/app.py")
+            configure_dashboard_module(module, temp_root)
+            snapshot = module.collect_snapshot(include_linkedin=True)
+            html = module._render_snapshot(snapshot, tab="linkedin")
+
+        self.assertIn('data-linkedin-root', html)
+        self.assertIn('data-linkedin-open="draft-12345678"', html)
+        self.assertIn("Open post", html)
+        self.assertIn("Re-trigger", html)
+        self.assertIn('data-linkedin-panel hidden', html)
+        self.assertIn('replace(/\\r\\n/g, "\\n")', html)
+        self.assertIn('source.split("\\n")', html)
+        self.assertIn('trimmed.match(/^(#{1,6})\\s+(.*)$/)', html)
+        self.assertIn('data-linkedin-save', html)
+        self.assertIn('void openLinkedInDraft(linkedinState.selectedDraftId, true);', html)
+
+    def test_linkedin_editor_payload_and_save_round_trip_note(self):
+        with TemporaryDirectory() as td:
+            temp_root = Path(td)
+            (temp_root / "logs").mkdir()
+            (temp_root / "data").mkdir()
+            (temp_root / "vault" / "LinkedIn" / "2026-04").mkdir(parents=True)
+            (temp_root / "logs" / "jarvis.log").write_text(
+                "\n".join(
+                    [
+                        "2026-04-05 15:00:00 [INFO] __main__: Starting Jarvis...",
+                        "2026-04-05 15:03:00 [INFO] telegram.ext.Application: Application started",
+                    ]
+                )
+            )
+            db_path = temp_root / "data" / "jarvis_memory.db"
+            create_memory_db(db_path)
+            note_path = "LinkedIn/2026-04/test-post_draft-12.md"
+            note_file = temp_root / "vault" / note_path
+            note_file.write_text(
+                "---\ncreated_at: \"2026-04-09T09:00:00+00:00\"\n---\n\n# Test Post\n\nHello markdown world.\n",
+                encoding="utf-8",
+            )
+            insert_linkedin_draft(
+                db_path,
+                draft_id="draft-12345678",
+                obsidian_path=note_path,
+                obsidian_filename="test_post_draft-12",
+            )
+
+            module = load_module("tested_dashboard_linkedin_save", "dashboard/app.py")
+            configure_dashboard_module(module, temp_root)
+
+            payload, status_code = module._linkedin_editor_payload("draft-12")
+            self.assertEqual(status_code, 200)
+            self.assertTrue(payload["editable"])
+            self.assertEqual(payload["draftId"], "draft-12345678")
+            self.assertEqual(payload["headline"], "Test Post")
+            self.assertIn("Hello markdown world.", payload["content"])
+
+            updated_payload, updated_status = module._save_linkedin_draft_content(
+                "draft-12",
+                "# Test Post\n\nUpdated markdown body.\n",
+            )
+            saved_text = note_file.read_text(encoding="utf-8")
+
+        self.assertEqual(updated_status, 200)
+        self.assertEqual(updated_payload["detail"], "Saved to Obsidian.")
+        self.assertIn("Updated markdown body.", saved_text)
+
+    def test_linkedin_editor_payload_reports_fallback_when_note_read_fails(self):
+        with TemporaryDirectory() as td:
+            temp_root = Path(td)
+            (temp_root / "logs").mkdir()
+            (temp_root / "data").mkdir()
+            (temp_root / "vault" / "LinkedIn" / "2026-04").mkdir(parents=True)
+            (temp_root / "logs" / "jarvis.log").write_text(
+                "\n".join(
+                    [
+                        "2026-04-05 15:00:00 [INFO] __main__: Starting Jarvis...",
+                        "2026-04-05 15:03:00 [INFO] telegram.ext.Application: Application started",
+                    ]
+                )
+            )
+            db_path = temp_root / "data" / "jarvis_memory.db"
+            create_memory_db(db_path)
+            note_path = "LinkedIn/2026-04/test-post_draft-12.md"
+            insert_linkedin_draft(
+                db_path,
+                draft_id="draft-12345678",
+                obsidian_path=note_path,
+                obsidian_filename="test_post_draft-12",
+                source_text="Original source text",
+            )
+
+            module = load_module("tested_dashboard_linkedin_fallback", "dashboard/app.py")
+            configure_dashboard_module(module, temp_root)
+
+            original = module._read_note_content
+            module._read_note_content = lambda *args, **kwargs: ("", "", False)
+            try:
+                payload, status_code = module._linkedin_editor_payload("draft-12")
+            finally:
+                module._read_note_content = original
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(
+            payload["detail"],
+            "Could not read the saved post from Obsidian. Showing a fallback scaffold.",
+        )
+        self.assertIn("Original source text", payload["content"])
+
+    def test_linkedin_editor_payload_marks_scaffold_content_as_needs_attention(self):
+        with TemporaryDirectory() as td:
+            temp_root = Path(td)
+            (temp_root / "logs").mkdir()
+            (temp_root / "data").mkdir()
+            (temp_root / "vault" / "LinkedIn" / "2026-04").mkdir(parents=True)
+            (temp_root / "logs" / "jarvis.log").write_text(
+                "2026-04-05 15:03:00 [INFO] telegram.ext.Application: Application started"
+            )
+            db_path = temp_root / "data" / "jarvis_memory.db"
+            create_memory_db(db_path)
+            note_path = "LinkedIn/2026-04/test-post_draft-12.md"
+            note_file = temp_root / "vault" / note_path
+            note_file.write_text(
+                "# Test post draft 12\n\nOriginal source text\n\nSource: https://example.com/post\n",
+                encoding="utf-8",
+            )
+            insert_linkedin_draft(
+                db_path,
+                draft_id="draft-12345678",
+                obsidian_path=note_path,
+                obsidian_filename="test_post_draft-12",
+                source_text="Original source text",
+            )
+
+            module = load_module("tested_dashboard_linkedin_scaffold_status", "dashboard/app.py")
+            configure_dashboard_module(module, temp_root)
+            payload, status_code = module._linkedin_editor_payload("draft-12")
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["status"], "needs_attention")
+        self.assertTrue(payload["canRetry"])
+        self.assertIn("fallback scaffold", payload["detail"])
+
+    def test_retry_linkedin_draft_processing_requeues_and_processes_from_ui(self):
+        with TemporaryDirectory() as td:
+            temp_root = Path(td)
+            (temp_root / "logs").mkdir()
+            (temp_root / "data").mkdir()
+            (temp_root / "vault").mkdir()
+            (temp_root / "logs" / "jarvis.log").write_text(
+                "2026-04-05 15:03:00 [INFO] telegram.ext.Application: Application started"
+            )
+            db_path = temp_root / "data" / "jarvis_memory.db"
+            create_memory_db(db_path)
+            insert_linkedin_draft(
+                db_path,
+                draft_id="draft-12345678",
+                obsidian_path="LinkedIn/2026-04/stale.md",
+                obsidian_filename="stale",
+                source_text="Original source text",
+            )
+
+            module = load_module("tested_dashboard_linkedin_retry", "dashboard/app.py")
+            configure_dashboard_module(module, temp_root)
+
+            fake_sqlite_store = types.ModuleType("linkedin.sqlite_store")
+            state = {
+                "row": {
+                    "id": "draft-12345678",
+                    "status": "ready",
+                    "voice": "professional",
+                    "pillar_label": "Operator Commentary",
+                    "source_type": "manual",
+                    "source_author": "Source Author",
+                    "source_url": "https://example.com/post",
+                    "obsidian_path": "LinkedIn/2026-04/fresh.md",
+                    "obsidian_filename": "fresh",
+                    "updated_at": "2026-04-09T09:00:00+00:00",
+                    "created_at": "2026-04-09T09:00:00+00:00",
+                    "source_text": "Original source text",
+                    "rewrite_of": "",
+                    "attempts": 0,
+                }
+            }
+
+            def fake_requeue_draft(draft_id, clear_artefacts=False):
+                state["row"]["status"] = "pending_generation"
+                state["row"]["obsidian_path"] = ""
+                state["row"]["obsidian_filename"] = ""
+                conn = sqlite3.connect(db_path)
+                conn.execute(
+                    "UPDATE linkedin_drafts SET status='pending_generation', obsidian_path='', obsidian_filename='' WHERE id=?",
+                    (draft_id,),
+                )
+                conn.commit()
+                conn.close()
+                return dict(state["row"])
+
+            def fake_get_by_id(draft_id):
+                return dict(state["row"])
+
+            fake_sqlite_store.requeue_draft = fake_requeue_draft
+            fake_sqlite_store.get_by_id = fake_get_by_id
+
+            fake_processor = types.ModuleType("linkedin.processor")
+
+            def fake_process_pending_drafts(notes_manager, notifier=None):
+                state["row"]["status"] = "ready"
+                state["row"]["obsidian_path"] = "LinkedIn/2026-04/fresh.md"
+                state["row"]["obsidian_filename"] = "fresh"
+                conn = sqlite3.connect(db_path)
+                conn.execute(
+                    "UPDATE linkedin_drafts SET status='ready', obsidian_path=?, obsidian_filename=? WHERE id=?",
+                    (state["row"]["obsidian_path"], state["row"]["obsidian_filename"], state["row"]["id"]),
+                )
+                conn.commit()
+                conn.close()
+                note_file = temp_root / "vault" / state["row"]["obsidian_path"]
+                note_file.parent.mkdir(parents=True, exist_ok=True)
+                note_file.write_text("# Fresh post\n\nActual generated post body.\n", encoding="utf-8")
+                return {"processed": 1, "failed": 0, "skipped": 0, "errors": []}
+
+            fake_processor.process_pending_drafts = fake_process_pending_drafts
+
+            with mock.patch.dict(
+                sys.modules,
+                {
+                    "linkedin.sqlite_store": fake_sqlite_store,
+                    "linkedin.processor": fake_processor,
+                },
+                clear=False,
+            ):
+                payload, status_code = module._retry_linkedin_draft_processing("draft-12")
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["status"], "ready")
+        self.assertEqual(payload["detail"], "Post re-triggered and saved to Obsidian.")
+        self.assertIn("Actual generated post body.", payload["content"])
 
 
 if __name__ == "__main__":
