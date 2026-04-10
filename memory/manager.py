@@ -199,6 +199,18 @@ class MemoryManager:
         )
         self._db.commit()
         if cursor.rowcount > 0:
+            try:
+                self._db.execute(
+                    """
+                    UPDATE reminders
+                    SET status='completed', completed_at=?, updated_at=?
+                    WHERE task_id=? AND until_task_done=1 AND status='scheduled'
+                    """,
+                    (now, now, task_id),
+                )
+                self._db.commit()
+            except sqlite3.OperationalError:
+                logger.debug("Reminders table not available when completing task %s", task_id)
             record_audit(
                 event="task_completed",
                 component="memory",

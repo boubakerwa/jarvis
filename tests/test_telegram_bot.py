@@ -85,6 +85,23 @@ class FakeManagedProactiveBot:
         self.calls.append((chat_id, text))
 
 
+class FakeReminders:
+    def list_reminders(self, status):
+        return [
+            {
+                "id": "abcd1234-0000-0000-0000-000000000000",
+                "message": "Call doctor",
+                "next_run_at": "2026-04-06T08:00:00+00:00",
+                "status": status,
+                "recurrence": None,
+                "task_id": None,
+            }
+        ]
+
+    def describe_reminder(self, reminder):
+        return f"[{reminder['id'][:8]}] {reminder['status']} for 2026-04-06 10:00 CEST (one-off) - {reminder['message']}"
+
+
 class TelegramBotTests(unittest.TestCase):
     def test_publish_bot_commands_registers_default_and_chat_scope(self):
         module = load_module("tested_telegram_bot", "telegram_bot/bot.py")
@@ -95,12 +112,26 @@ class TelegramBotTests(unittest.TestCase):
 
         self.assertEqual(len(app.bot.calls), 2)
         command_names = [command.command for command in app.bot.calls[0][0]]
-        self.assertEqual(command_names, ["status", "llmops", "memories", "forget", "reset", "linkedin"])
+        self.assertEqual(command_names, ["status", "llmops", "memories", "reminders", "forget", "reset", "linkedin"])
         self.assertIsNone(app.bot.calls[0][1])
         self.assertEqual(
             app.bot.calls[1][1].chat_id,
             module.settings.TELEGRAM_ALLOWED_USER_ID,
         )
+
+    def test_reminders_command_lists_scheduled_reminders(self):
+        module = load_module("tested_telegram_bot_reminders", "telegram_bot/bot.py")
+        bot = module.TelegramBot.__new__(module.TelegramBot)
+        bot._reminders = FakeReminders()
+        update = FakeUpdate()
+
+        asyncio.run(bot._cmd_reminders(update, SimpleNamespace(args=["scheduled"])))
+
+        self.assertEqual(len(update.message.calls), 1)
+        text, parse_mode = update.message.calls[0]
+        self.assertEqual(parse_mode, "Markdown")
+        self.assertIn("*Reminders (scheduled)*", text)
+        self.assertIn("Call doctor", text)
 
     def test_llmops_command_reports_usage_summary(self):
         module = load_module("tested_telegram_bot_llmops", "telegram_bot/bot.py")

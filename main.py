@@ -390,6 +390,12 @@ def main():
     logger.info("Memory manager initialised (%d memories)", memory_manager.count())
     record_audit(event="memory_ready", component="memory", summary="Memory manager initialised")
 
+    # Reminders
+    from reminders import ReminderManager
+    reminder_manager = ReminderManager()
+    logger.info("Reminder manager initialised")
+    record_audit(event="reminders_ready", component="reminders", summary="Reminder manager initialised")
+
     # Drive
     from storage.drive import DriveClient
     drive_client = DriveClient()
@@ -441,6 +447,7 @@ def main():
         drive_client=drive_client,
         calendar_client=calendar_client,
         notes_manager=notes_manager,
+        reminder_manager=reminder_manager,
     )
     logger.info("Agent initialised")
     record_audit(event="agent_ready", component="agent", summary="Agent initialised")
@@ -456,11 +463,29 @@ def main():
         drive_client=drive_client,
         calendar_client=calendar_client,
         notes_manager=notes_manager,
+        reminder_manager=reminder_manager,
     )
     proactive_notifier = TelegramProactiveNotifier(
-        enabled=settings.TELEGRAM_EMAIL_SUMMARY_NOTIFICATIONS,
+        enabled=True,
     )
     record_audit(event="telegram_ready", component="telegram", summary="Telegram bot initialised")
+
+    from reminders import ReminderDeliveryRunner
+    reminder_runner = ReminderDeliveryRunner(
+        reminder_manager=reminder_manager,
+        notifier=proactive_notifier,
+    )
+    reminder_thread = threading.Thread(
+        target=reminder_runner.run_forever,
+        daemon=True,
+        name="reminder-delivery",
+    )
+    reminder_thread.start()
+    record_activity(
+        event="reminder_delivery_started",
+        component="reminders",
+        summary="Reminder delivery loop started",
+    )
 
     # LinkedIn processor cron (every 15 minutes)
     def _linkedin_cron_loop() -> None:
@@ -518,7 +543,8 @@ def main():
     # Batch: send one aggregated summary after all emails in the poll cycle are processed.
     def batch_callback(emails):
         results = _email_results[-len(emails):]  # grab the matching tail
-        proactive_notifier.send_message(_format_batch_summary(results))
+        if settings.TELEGRAM_EMAIL_SUMMARY_NOTIFICATIONS:
+            proactive_notifier.send_message(_format_batch_summary(results))
 
     watcher = GmailWatcher(on_email=email_callback, on_batch=batch_callback)
     gmail_thread = threading.Thread(target=watcher.run_forever, daemon=True, name="gmail-watcher")

@@ -23,6 +23,66 @@ logger = logging.getLogger(__name__)
 # Tool definitions passed to the model
 TOOLS: list[dict] = [
     {
+        "name": "schedule_message",
+        "description": (
+            "Schedule a proactive Telegram message for Wess. "
+            "Use this for explicit reminder requests like 'remind me', 'ping me later', or 'follow up in 2 hours'. "
+            "You may also set recurrence for repeating reminders."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string",
+                    "description": "The exact message Jarvis should send to Wess later via Telegram.",
+                },
+                "when": {
+                    "type": "string",
+                    "description": "When to send it. Accepts ISO datetimes or natural language like 'today at 3pm' or 'in 2 hours'.",
+                },
+                "recurrence": {
+                    "type": "string",
+                    "description": "Optional repeat rule such as 'daily', 'weekly', 'every 2 hours', or 'weekdays'.",
+                },
+                "task_id": {
+                    "type": "string",
+                    "description": "Optional linked task ID. Useful for repeated reminders tied to a task.",
+                },
+                "until_task_done": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "When true, stop sending this reminder after the linked task is marked done.",
+                },
+            },
+            "required": ["message", "when"],
+        },
+    },
+    {
+        "name": "list_reminders",
+        "description": "List scheduled Telegram reminders so you can review what is queued.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": ["scheduled", "cancelled", "completed", "all"],
+                    "default": "scheduled",
+                },
+            },
+        },
+    },
+    {
+        "name": "cancel_reminder",
+        "description": "Cancel a scheduled reminder by ID. Accepts the full ID or the short 8-character prefix from list_reminders.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "reminder_id": {"type": "string", "description": "Reminder ID from list_reminders."},
+            },
+            "required": ["reminder_id"],
+        },
+    },
+    {
         "name": "remember",
         "description": (
             "Store or update a memory. If a memory with this topic already exists, "
@@ -284,8 +344,9 @@ TOOLS: list[dict] = [
     {
         "name": "create_task",
         "description": (
-            "Create a task or reminder. "
-            "ONLY use when Wess explicitly asks — e.g. 'remind me to...', 'add to my todo', 'create a task'. "
+            "Create a task or todo item in Jarvis's task list. "
+            "This does not send Telegram automatically. "
+            "ONLY use when Wess explicitly asks — e.g. 'add to my todo' or 'create a task'. "
             "Never create tasks proactively."
         ),
         "input_schema": {
@@ -352,12 +413,13 @@ TOOLS: list[dict] = [
 
 
 class JarvisAgent:
-    def __init__(self, memory_manager: MemoryManager, drive_client=None, calendar_client=None, notes_manager=None):
+    def __init__(self, memory_manager: MemoryManager, drive_client=None, calendar_client=None, notes_manager=None, reminder_manager=None):
         self._client = create_llm_client()
         self._memory = memory_manager
         self._drive = drive_client
         self._calendar = calendar_client
         self._notes = notes_manager
+        self._reminders = reminder_manager
         self._history: list[dict] = []
         self._current_user_message = ""
 
@@ -453,7 +515,13 @@ class JarvisAgent:
 
     def _execute_tool(self, name: str, inputs: dict) -> str:
         try:
-            if name == "remember":
+            if name == "schedule_message":
+                return self._tool_schedule_message(inputs)
+            elif name == "list_reminders":
+                return self._tool_list_reminders(inputs)
+            elif name == "cancel_reminder":
+                return self._tool_cancel_reminder(inputs)
+            elif name == "remember":
                 return self._tool_remember(inputs)
             elif name == "recall":
                 return self._tool_recall(inputs)
@@ -504,6 +572,46 @@ class JarvisAgent:
     # ------------------------------------------------------------------
     # Tool implementations
     # ------------------------------------------------------------------
+
+    def _tool_schedule_message(self, inputs: dict) -> str:
+        if not self._reminders:
+            return "Reminder manager not initialised."
+
+        try:
+            reminder = self._reminders.schedule_message(
+                inputs["message"],
+                inputs["when"],
+                recurrence=inputs.get("recurrence"),
+                task_id=inputs.get("task_id"),
+                until_task_done=inputs.get("until_task_done", False),
+                now=get_local_now(),
+            )
+        except ValueError as e:
+            return f"Could not schedule reminder: {e}"
+
+        short_id = reminder["id"][:8]
+        scheduled_for = self._reminders.describe_reminder(reminder)
+        return f"Reminder scheduled: {scheduled_for} (ID: {short_id})"
+
+    def _tool_list_reminders(self, inputs: dict) -> str:
+        if not self._reminders:
+            return "Reminder manager not initialised."
+        status = inputs.get("status", "scheduled")
+        reminders = self._reminders.list_reminders(status)
+        if not reminders:
+            return f"No {status} reminders." if status != "all" else "No reminders found."
+        return "\n".join(f"- {self._reminders.describe_reminder(reminder)}" for reminder in reminders)
+
+    def _tool_cancel_reminder(self, inputs: dict) -> str:
+        if not self._reminders:
+            return "Reminder manager not initialised."
+        try:
+            reminder = self._reminders.cancel_reminder(inputs["reminder_id"], now=get_local_now())
+        except ValueError as e:
+            return f"Could not cancel reminder: {e}"
+        if reminder is None:
+            return f"No scheduled reminder found with ID starting with '{inputs['reminder_id']}'."
+        return f"Reminder cancelled: {self._reminders.describe_reminder(reminder)}"
 
     def _tool_remember(self, inputs: dict) -> str:
         record = MemoryRecord(

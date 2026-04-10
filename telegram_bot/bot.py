@@ -98,12 +98,13 @@ class TelegramProactiveNotifier:
 
 
 class TelegramBot:
-    def __init__(self, agent, memory_manager, drive_client=None, calendar_client=None, notes_manager=None, linkedin_drive=None):
+    def __init__(self, agent, memory_manager, drive_client=None, calendar_client=None, notes_manager=None, reminder_manager=None, linkedin_drive=None):
         self._agent = agent
         self._memory = memory_manager
         self._drive = drive_client
         self._calendar = calendar_client
         self._notes = notes_manager
+        self._reminders = reminder_manager
         self._app = (
             Application.builder()
             .token(settings.TELEGRAM_BOT_TOKEN)
@@ -125,6 +126,7 @@ class TelegramBot:
         allow = filters.User(user_id=settings.TELEGRAM_ALLOWED_USER_ID)
 
         self._app.add_handler(CommandHandler("memories", self._cmd_memories, filters=allow))
+        self._app.add_handler(CommandHandler("reminders", self._cmd_reminders, filters=allow))
         self._app.add_handler(CommandHandler("forget", self._cmd_forget, filters=allow))
         self._app.add_handler(CommandHandler("reset", self._cmd_reset, filters=allow))
         self._app.add_handler(CommandHandler("status", self._cmd_status, filters=allow))
@@ -149,6 +151,7 @@ class TelegramBot:
             BotCommand("status", "Show system status"),
             BotCommand("llmops", "Show model usage and costs"),
             BotCommand("memories", "List stored memories"),
+            BotCommand("reminders", "List scheduled reminders"),
             BotCommand("forget", "Delete a memory by topic"),
             BotCommand("reset", "Clear chat history"),
             BotCommand("linkedin", "Draft a LinkedIn post from text or URL"),
@@ -202,6 +205,29 @@ class TelegramBot:
 
         text = "\n".join(lines).strip()
         # Telegram message limit is 4096 chars
+        for chunk in _split_message(text, 4096):
+            await update.message.reply_text(chunk, parse_mode="Markdown")
+
+    async def _cmd_reminders(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._reminders:
+            await update.message.reply_text("Reminder manager not initialised.")
+            return
+
+        status = (context.args[0].strip().lower() if context.args else "scheduled")
+        allowed_statuses = {"scheduled", "cancelled", "completed", "all"}
+        if status not in allowed_statuses:
+            await update.message.reply_text("Usage: /reminders [scheduled|cancelled|completed|all]")
+            return
+
+        reminders = self._reminders.list_reminders(status)
+        if not reminders:
+            message = f"No {status} reminders." if status != "all" else "No reminders found."
+            await update.message.reply_text(message)
+            return
+
+        lines = [f"*Reminders ({status})*"]
+        lines.extend(f"- {self._reminders.describe_reminder(reminder)}" for reminder in reminders)
+        text = "\n".join(lines)
         for chunk in _split_message(text, 4096):
             await update.message.reply_text(chunk, parse_mode="Markdown")
 
