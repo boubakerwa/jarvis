@@ -71,6 +71,39 @@ class FakeReminders:
         return f"[{reminder['id'][:8]}] {reminder['status']} for 2026-04-06 10:00 CEST (one-off) — {reminder['message']}"
 
 
+class FakeMemory:
+    def list_tasks(self, status="pending"):
+        if status == "all":
+            return [
+                {
+                    "id": "visible12-0000-0000-0000-000000000000",
+                    "description": "Visible task",
+                    "due_date": None,
+                    "status": "pending",
+                    "source": "manual",
+                    "surfaced": 1,
+                },
+                {
+                    "id": "remind123-0000-0000-0000-000000000000",
+                    "description": "Reminder-backed task",
+                    "due_date": "2026-04-06T08:00:00+00:00",
+                    "status": "pending",
+                    "source": "reminder",
+                    "surfaced": 0,
+                },
+            ]
+        return [
+            {
+                "id": "visible12-0000-0000-0000-000000000000",
+                "description": "Visible task",
+                "due_date": None,
+                "status": "pending",
+                "source": "manual",
+                "surfaced": 1,
+            }
+        ]
+
+
 class AgentReminderTests(unittest.TestCase):
     def setUp(self):
         self.module = load_module("tested_agent_reminders", "core/agent.py")
@@ -108,6 +141,24 @@ class AgentReminderTests(unittest.TestCase):
         response = agent._tool_cancel_reminder({"reminder_id": "missing"})
 
         self.assertIn("No scheduled reminder found", response)
+
+    def test_list_tasks_ignores_hidden_reminder_backing_tasks(self):
+        agent = self.module.JarvisAgent.__new__(self.module.JarvisAgent)
+        agent._memory = FakeMemory()
+
+        response = agent._tool_list_tasks({"status": "pending"})
+
+        self.assertIn("Visible task", response)
+
+    def test_list_tasks_all_shows_hidden_reminder_backing_tasks_with_marker(self):
+        agent = self.module.JarvisAgent.__new__(self.module.JarvisAgent)
+        agent._memory = FakeMemory()
+
+        response = agent._tool_list_tasks({"status": "all"})
+
+        self.assertIn("Visible task", response)
+        self.assertIn("Reminder-backed task", response)
+        self.assertIn("[reminder]", response)
 
 
 if __name__ == "__main__":

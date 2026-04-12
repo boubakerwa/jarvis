@@ -10,8 +10,35 @@ import os
 import re
 from dataclasses import dataclass
 
+from config import settings
 from core.structured_output import generate_validated_json
 from storage.schema import TOP_LEVEL_FOLDERS, build_classification_prompt
+
+_LOCAL_CLASSIFICATION_RULES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("Finances", "Tax", ("tax", "steuer", "finanzamt", "steuerbescheid", "vat", "irs")),
+    ("Finances", "Investments", ("investment", "broker", "portfolio", "dividend", "depot", "wertpapier", "ertraege")),
+    ("Finances", "Banking", ("invoice", "rechnung", "receipt", "quittung", "kontoauszug", "bank", "iban", "payment")),
+    ("Insurance", "Health", ("insurance", "versicherung", "krankenversicherung", "policy", "premium", "claim", "tk", "aok")),
+    ("Insurance", "Liability", ("liability", "haftpflicht")),
+    ("Insurance", "Vehicle", ("car insurance", "kfz", "vehicle insurance", "fahrzeugversicherung")),
+    ("Legal & Contracts", "Employment", ("contract", "employment", "arbeitsvertrag", "agreement", "signature", "signed")),
+    ("Legal & Contracts", "Rental", ("rent", "rental", "lease", "mietvertrag", "landlord")),
+    ("Travel", "Bookings", ("booking", "flight", "hotel", "airbnb", "boarding pass", "reservation")),
+    ("Travel", "Visas & Docs", ("visa", "passport", "residence permit", "aufenthaltstitel")),
+    ("Health", "Records", ("doctor", "clinic", "medical", "lab", "diagnosis", "record", "arzt")),
+    ("Health", "Prescriptions", ("prescription", "medication", "rezept", "pharmacy")),
+    ("Subscriptions", "General", ("subscription", "monthly plan", "renewal", "abonnement", "membership")),
+    ("Real Estate", "General", ("property", "apartment", "house purchase", "mortgage", "notary")),
+    ("Vehicles", "General", ("vehicle", "car", "registration", "driving licence", "license plate")),
+    ("Projects & Side Hustles", "Sufra", ("sufra",)),
+    ("Projects & Side Hustles", "Other", ("project", "proposal", "client", "freelance", "side hustle")),
+    ("PR", "LinkedIn Composer", ("linkedin", "social post", "post draft")),
+    ("Personal Development", "Courses & Certificates", ("course", "certificate", "training", "workshop")),
+    ("Personal Development", "Books & Resources", ("book", "ebook", "guide", "resource")),
+    ("Household", "Utilities", ("utility", "electricity", "internet", "water bill", "gas bill")),
+    ("Household", "Repairs & Services", ("repair", "service visit", "plumber", "electrician")),
+    ("Household", "Appliances & Warranties", ("warranty", "appliance", "manual", "guarantee")),
+)
 
 
 @dataclass
@@ -67,6 +94,57 @@ def _validate_classification_payload(data: dict, original_filename: str) -> Clas
     )
 
 
+def build_review_classification(
+    original_filename: str,
+    *,
+    summary: str = "Document stored for manual review because anonymization-safe processing was unavailable.",
+) -> ClassificationResult:
+    return ClassificationResult(
+        top_level="Misc",
+        sub_folder="Needs Review",
+        filename=_sanitize_filename("needs_review_document", original_filename),
+        summary=summary[:280],
+    )
+
+
+def classify_attachment_locally(
+    original_filename: str,
+    mime_type: str,
+    text_content: str,
+    *,
+    summary_reason: str = "",
+) -> ClassificationResult:
+    haystack = f"{original_filename}\n{text_content}".lower()
+    best_top_level = "Misc"
+    best_sub_folder = "Needs Review"
+    best_score = 0
+
+    for top_level, sub_folder, keywords in _LOCAL_CLASSIFICATION_RULES:
+        score = sum(1 for keyword in keywords if keyword in haystack)
+        if score > best_score:
+            best_score = score
+            best_top_level = top_level
+            best_sub_folder = sub_folder
+
+    if best_score == 0 and mime_type.startswith("image/"):
+        best_sub_folder = "Needs Review"
+
+    summary_prefix = "Locally classified without remote document processing"
+    if summary_reason:
+        summary = f"{summary_prefix} because {summary_reason}."
+    elif best_score > 0:
+        summary = f"{summary_prefix} using filename and extracted-text keywords."
+    else:
+        summary = f"{summary_prefix}; insufficient signals for a stronger category match."
+
+    return ClassificationResult(
+        top_level=best_top_level if best_top_level in TOP_LEVEL_FOLDERS else "Misc",
+        sub_folder=_sanitize_sub_folder(best_sub_folder),
+        filename=_sanitize_filename(original_filename, original_filename),
+        summary=summary[:280],
+    )
+
+
 def classify_attachment(
     original_filename: str,
     mime_type: str,
@@ -79,6 +157,8 @@ def classify_attachment(
     Returns a ClassificationResult with the target Drive path and filename.
     """
     if mime_type.startswith("image/") and not text_content and raw_data:
+        if settings.JARVIS_ANONYMIZATION_ENABLED:
+            raise ValueError("image-only documents require a local-safe review fallback while anonymization is enabled")
         from utils.text_extraction import describe_image
         text_content = describe_image(raw_data, mime_type)
 

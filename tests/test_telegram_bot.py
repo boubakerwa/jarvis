@@ -52,6 +52,7 @@ class FakeUpdate:
     def __init__(self):
         self.message = FakeMessage()
         self.effective_user = SimpleNamespace(id=12345)
+        self.effective_chat = SimpleNamespace(id=12345)
 
 
 class FakeProactiveBot:
@@ -59,8 +60,8 @@ class FakeProactiveBot:
         self.should_fail = should_fail
         self.calls = []
 
-    async def send_message(self, chat_id, text):
-        self.calls.append((chat_id, text))
+    async def send_message(self, chat_id, text, reply_markup=None):
+        self.calls.append((chat_id, text, reply_markup))
         if self.should_fail:
             raise RuntimeError("network error")
 
@@ -81,8 +82,8 @@ class FakeManagedProactiveBot:
     async def __aexit__(self, exc_type, exc, tb):
         self.events.append("exit")
 
-    async def send_message(self, chat_id, text):
-        self.calls.append((chat_id, text))
+    async def send_message(self, chat_id, text, reply_markup=None):
+        self.calls.append((chat_id, text, reply_markup))
 
 
 class FakeReminders:
@@ -100,6 +101,52 @@ class FakeReminders:
 
     def describe_reminder(self, reminder):
         return f"[{reminder['id'][:8]}] {reminder['status']} for 2026-04-06 10:00 CEST (one-off) - {reminder['message']}"
+
+
+class FakeMemory:
+    def __init__(self):
+        self.completed = []
+
+    def complete_task(self, task_id):
+        self.completed.append(task_id)
+        return True
+
+
+class FakeChatResetManager:
+    def __init__(self):
+        self.started = []
+        self.reset_calls = []
+        self.dismiss_calls = []
+
+    def start_session(self, *, now=None, force_new=False):
+        self.started.append({"now": now, "force_new": force_new})
+        return {"id": "chatreset-1234"}
+
+    def reset_session(self, session_id=None, *, now=None):
+        self.reset_calls.append({"session_id": session_id, "now": now})
+        return {"id": session_id or "chatreset-1234"}
+
+    def dismiss_session(self, session_id=None, *, now=None):
+        self.dismiss_calls.append({"session_id": session_id, "now": now})
+        return {"id": session_id or "chatreset-1234"}
+
+
+class FakeCallbackQuery:
+    def __init__(self, data):
+        self.data = data
+        self.answered = 0
+        self.edits = []
+
+    async def answer(self):
+        self.answered += 1
+
+    async def edit_message_text(self, text):
+        self.edits.append(text)
+
+
+class FakeCallbackUpdate:
+    def __init__(self, data):
+        self.callback_query = FakeCallbackQuery(data)
 
 
 class TelegramBotTests(unittest.TestCase):
@@ -215,9 +262,9 @@ class TelegramBotTests(unittest.TestCase):
         self.assertEqual(
             fake_bot.calls,
             [
-                (12345, "Email fi"),
-                (12345, "led succ"),
-                (12345, "essfully"),
+                (12345, "Email fi", None),
+                (12345, "led succ", None),
+                (12345, "essfully", None),
             ],
         )
 
@@ -241,7 +288,7 @@ class TelegramBotTests(unittest.TestCase):
             sent = notifier.send_message("Attempt")
 
         self.assertFalse(sent)
-        self.assertEqual(fake_bot.calls, [(12345, "Attempt")])
+        self.assertEqual(fake_bot.calls, [(12345, "Attempt", None)])
         issue_mock.assert_called_once()
 
     def test_proactive_notifier_uses_short_lived_bot_session_when_not_injected(self):
@@ -262,12 +309,13 @@ class TelegramBotTests(unittest.TestCase):
         instance = FakeManagedProactiveBot.instances[0]
         self.assertEqual(instance.token, "token-123")
         self.assertEqual(instance.events, ["enter", "exit"])
-        self.assertEqual(instance.calls, [(67890, "Short lived session")])
+        self.assertEqual(instance.calls, [(67890, "Short lived session", None)])
 
     def test_handle_message_appends_total_cost_footer(self):
         module = load_module("tested_telegram_bot_message_costs", "telegram_bot/bot.py")
         bot = module.TelegramBot.__new__(module.TelegramBot)
         bot._agent = SimpleNamespace(chat=lambda text: "Hello from Marvis")
+        bot._chat_reset = None
         update = FakeUpdate()
 
         with patch.object(
@@ -296,6 +344,136 @@ class TelegramBotTests(unittest.TestCase):
         self.assertIsNone(parse_mode)
         self.assertIn("Hello from Marvis", text)
         self.assertIn("Total LLM cost so far: $0.0123", text)
+
+    def test_handle_message_starts_chat_reset_session_on_first_message(self):
+        module = load_module("tested_telegram_bot_chat_reset_start", "telegram_bot/bot.py")
+        bot = module.TelegramBot.__new__(module.TelegramBot)
+        bot._agent = SimpleNamespace(chat=lambda text: "Hello from Marvis", history_is_empty=lambda: True)
+        bot._chat_reset = FakeChatResetManager()
+        update = FakeUpdate()
+
+        with patch.object(
+            module,
+            "_load_llmops_summary",
+            return_value={
+                "call_count": 1,
+                "success_count": 1,
+                "error_count": 0,
+                "avg_latency_ms": 1.0,
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "total_tokens": 2,
+                "estimated_cost_usd": 0.0,
+                "priced_call_count": 1,
+                "model_count": 1,
+                "last_recorded_at": "2026-04-09T10:00:00+00:00",
+                "top_tasks": [],
+            },
+        ), patch.object(module, "record_activity"), patch.object(module, "record_issue"), patch.object(module.logger, "info"):
+            asyncio.run(bot._handle_message(update, SimpleNamespace()))
+
+        self.assertEqual(len(bot._chat_reset.started), 1)
+        self.assertTrue(bot._chat_reset.started[0]["force_new"])
+
+    def test_cmd_reset_stops_chat_reset_session(self):
+        module = load_module("tested_telegram_bot_cmd_reset", "telegram_bot/bot.py")
+        bot = module.TelegramBot.__new__(module.TelegramBot)
+        bot._agent = SimpleNamespace(reset_history=lambda: None)
+        bot._chat_reset = FakeChatResetManager()
+        update = FakeUpdate()
+
+        asyncio.run(bot._cmd_reset(update, SimpleNamespace()))
+
+        self.assertEqual(len(bot._chat_reset.reset_calls), 1)
+        self.assertEqual(update.message.calls[0][0], "Conversation history cleared. Long-term memories are intact.")
+
+    def test_handle_callback_query_marks_linked_task_done_without_agent(self):
+        module = load_module("tested_telegram_bot_callback_done", "telegram_bot/bot.py")
+        bot = module.TelegramBot.__new__(module.TelegramBot)
+        bot._memory = FakeMemory()
+        bot._reminders = SimpleNamespace(
+            mark_completed=lambda reminder_id, now=None: {
+                "id": reminder_id,
+                "message": "Finish taxes",
+                "task_id": "task-1234",
+            }
+        )
+        update = FakeCallbackUpdate("reminder:done:abcd1234-0000-0000-0000-000000000000")
+
+        with patch.object(module, "record_activity"):
+            asyncio.run(bot._handle_callback_query(update, SimpleNamespace()))
+
+        self.assertEqual(bot._memory.completed, ["task-1234"])
+        self.assertEqual(update.callback_query.answered, 1)
+        self.assertIn("Marked done.", update.callback_query.edits[0])
+
+    def test_handle_callback_query_snoozes_reminder_without_agent(self):
+        module = load_module("tested_telegram_bot_callback_later", "telegram_bot/bot.py")
+        bot = module.TelegramBot.__new__(module.TelegramBot)
+        bot._memory = FakeMemory()
+        bot._reminders = SimpleNamespace(
+            snooze_reminder=lambda reminder_id, now=None: {
+                "id": reminder_id,
+                "message": "Finish taxes",
+                "task_id": "task-1234",
+                "next_run_at": "2026-04-05T10:40:00+00:00",
+            }
+        )
+        update = FakeCallbackUpdate("reminder:later:abcd1234-0000-0000-0000-000000000000")
+
+        with patch.object(module, "record_activity"):
+            asyncio.run(bot._handle_callback_query(update, SimpleNamespace()))
+
+        self.assertEqual(update.callback_query.answered, 1)
+        self.assertIn("Okay, I’ll remind you again", update.callback_query.edits[0])
+
+    def test_handle_callback_query_resets_chat_without_agent(self):
+        module = load_module("tested_telegram_bot_callback_chat_reset", "telegram_bot/bot.py")
+        reset_calls = []
+        bot = module.TelegramBot.__new__(module.TelegramBot)
+        bot._agent = SimpleNamespace(reset_history=lambda: reset_calls.append("reset"))
+        bot._chat_reset = FakeChatResetManager()
+        bot._reminders = None
+        update = FakeCallbackUpdate("chatreset:reset:chatreset-1234")
+
+        with patch.object(module, "record_activity"):
+            asyncio.run(bot._handle_callback_query(update, SimpleNamespace()))
+
+        self.assertEqual(reset_calls, ["reset"])
+        self.assertEqual(len(bot._chat_reset.reset_calls), 1)
+        self.assertIn("Chat reset. Context cleared", update.callback_query.edits[0])
+
+    def test_handle_callback_query_dismisses_chat_reset_without_agent(self):
+        module = load_module("tested_telegram_bot_callback_chat_dismiss", "telegram_bot/bot.py")
+        bot = module.TelegramBot.__new__(module.TelegramBot)
+        bot._agent = SimpleNamespace(reset_history=lambda: None)
+        bot._chat_reset = FakeChatResetManager()
+        bot._reminders = None
+        update = FakeCallbackUpdate("chatreset:dismiss:chatreset-1234")
+
+        with patch.object(module, "record_activity"):
+            asyncio.run(bot._handle_callback_query(update, SimpleNamespace()))
+
+        self.assertEqual(len(bot._chat_reset.dismiss_calls), 1)
+        self.assertIn("dismissed", update.callback_query.edits[0].lower())
+
+    def test_queue_file_to_drive_acknowledges_immediately(self):
+        module = load_module("tested_telegram_bot_file_queue", "telegram_bot/bot.py")
+        bot = module.TelegramBot.__new__(module.TelegramBot)
+        bot._drive = object()
+        bot._background_tasks = set()
+        update = FakeUpdate()
+        context = SimpleNamespace(bot=SimpleNamespace())
+
+        async def fake_file_to_drive(_context, _chat_id, _file_id, _filename, _mime_type):
+            return None
+
+        bot._file_to_drive = fake_file_to_drive
+
+        asyncio.run(bot._queue_file_to_drive(update, context, "file-1", "scan.pdf", "application/pdf"))
+
+        self.assertEqual(len(update.message.calls), 1)
+        self.assertIn("Queued scan.pdf for filing", update.message.calls[0][0])
 
 
 if __name__ == "__main__":

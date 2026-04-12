@@ -150,9 +150,11 @@ def _record_gmail_activity(email, outcome: str, reason: str = "", details: Optio
 
 def _handle_email(email, memory_manager, drive_client) -> EmailProcessingResult:
     """Process a new email: check relevance, then classify attachments and file to Drive."""
-    from agent_sdk.filer import classify_attachment
+    from agent_sdk.filer import classify_attachment, classify_attachment_locally
     from gmail.relevance import is_worth_filing
     from memory.schema import MemoryCategory, MemoryConfidence, MemoryRecord, MemorySource
+    from utils.anonymization import prepare_text_for_remote_processing
+    from utils.anonymization_store import upsert_anonymized_document
     from utils.financial_extraction import extract_financial_data
 
     op_id = new_op_id("email")
@@ -208,12 +210,38 @@ def _handle_email(email, memory_manager, drive_client) -> EmailProcessingResult:
 
         for attachment in email.attachments:
             try:
-                classification = classify_attachment(
-                    attachment.filename,
-                    attachment.mime_type,
+                model_text, anonymization_result, review_reason = prepare_text_for_remote_processing(
                     attachment.text_content,
+                    filename=attachment.filename,
+                    mime_type=attachment.mime_type,
                     raw_data=attachment.data,
                 )
+                if review_reason:
+                    record_issue(
+                        level="WARNING",
+                        event="email_attachment_local_classification_fallback",
+                        component="gmail",
+                        status="warning",
+                        summary="Attachment classified locally because anonymized text was unavailable",
+                        metadata={
+                            "message_id": email.message_id,
+                            "filename": attachment.filename,
+                            "reason": review_reason,
+                        },
+                    )
+                    classification = classify_attachment_locally(
+                        attachment.filename,
+                        attachment.mime_type,
+                        attachment.text_content or "",
+                        summary_reason=review_reason,
+                    )
+                else:
+                    classification = classify_attachment(
+                        attachment.filename,
+                        attachment.mime_type,
+                        model_text,
+                        raw_data=attachment.data,
+                    )
                 folder_id = drive_client.get_or_create_folder_path(
                     classification.top_level, classification.sub_folder
                 )
@@ -233,9 +261,22 @@ def _handle_email(email, memory_manager, drive_client) -> EmailProcessingResult:
                 )
                 memory_manager.upsert(record)
 
+                if anonymization_result and anonymization_result.sanitized_text.strip():
+                    upsert_anonymized_document(
+                        drive_file_id=drive_file_id,
+                        content_sha256=anonymization_result.content_sha256,
+                        original_filename=classification.filename,
+                        mime_type=attachment.mime_type,
+                        sanitized_text=anonymization_result.sanitized_text,
+                        backend=anonymization_result.backend,
+                        model=anonymization_result.model,
+                        replacement_counts=anonymization_result.replacement_counts,
+                        truncated=anonymization_result.truncated,
+                    )
+
                 # Extract financial data for finance-classified documents
-                if classification.top_level == "Finances" and attachment.text_content:
-                    financial = extract_financial_data(attachment.text_content, classification.filename)
+                if classification.top_level == "Finances" and model_text:
+                    financial = extract_financial_data(model_text, classification.filename)
                     if financial:
                         memory_manager.add_financial_record(
                             vendor=financial["vendor"],
@@ -391,8 +432,9 @@ def main():
     record_audit(event="memory_ready", component="memory", summary="Memory manager initialised")
 
     # Reminders
-    from reminders import ReminderManager
+    from reminders import ChatResetSessionManager, ReminderManager
     reminder_manager = ReminderManager()
+    chat_reset_manager = ChatResetSessionManager()
     logger.info("Reminder manager initialised")
     record_audit(event="reminders_ready", component="reminders", summary="Reminder manager initialised")
 
@@ -448,6 +490,7 @@ def main():
         calendar_client=calendar_client,
         notes_manager=notes_manager,
         reminder_manager=reminder_manager,
+        chat_reset_manager=chat_reset_manager,
     )
     logger.info("Agent initialised")
     record_audit(event="agent_ready", component="agent", summary="Agent initialised")
@@ -470,7 +513,7 @@ def main():
     )
     record_audit(event="telegram_ready", component="telegram", summary="Telegram bot initialised")
 
-    from reminders import ReminderDeliveryRunner
+    from reminders import ChatResetDeliveryRunner, ReminderDeliveryRunner
     reminder_runner = ReminderDeliveryRunner(
         reminder_manager=reminder_manager,
         notifier=proactive_notifier,
@@ -485,6 +528,22 @@ def main():
         event="reminder_delivery_started",
         component="reminders",
         summary="Reminder delivery loop started",
+    )
+
+    chat_reset_runner = ChatResetDeliveryRunner(
+        session_manager=chat_reset_manager,
+        notifier=proactive_notifier,
+    )
+    chat_reset_thread = threading.Thread(
+        target=chat_reset_runner.run_forever,
+        daemon=True,
+        name="chat-reset-delivery",
+    )
+    chat_reset_thread.start()
+    record_activity(
+        event="chat_reset_delivery_started",
+        component="telegram",
+        summary="Chat-reset reminder delivery loop started",
     )
 
     # LinkedIn processor cron (every 15 minutes)
