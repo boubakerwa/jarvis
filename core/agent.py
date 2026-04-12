@@ -985,13 +985,58 @@ class JarvisAgent:
         if not self._drive:
             return "Drive client not initialised."
         file_id = inputs["file_id"]
+
+        if settings.JARVIS_ANONYMIZATION_ENABLED:
+            from utils.anonymization import prepare_text_for_remote_processing
+            from utils.anonymization_store import get_anonymized_document, upsert_anonymized_document
+
+            stored = get_anonymized_document(file_id)
+            if stored and stored.sanitized_text:
+                text = stored.sanitized_text
+                if len(text) > 8000:
+                    text = text[:8000] + f"\n\n[...truncated - {len(text) - 8000} more chars]"
+                return f"Contents of '{stored.original_filename}':\n\n{text}"
+
         try:
             data, filename, mime_type = self._drive.download_file(file_id)
         except Exception as e:
             return f"Failed to download file: {e}"
 
         from utils.text_extraction import describe_image, extract_text
-        if mime_type.startswith("image/"):
+
+        if settings.JARVIS_ANONYMIZATION_ENABLED:
+            if mime_type.startswith("image/"):
+                return (
+                    f"Could not read '{filename}' safely because anonymization is enabled and "
+                    "no local-safe text extraction exists for image-only documents yet."
+                )
+
+            extracted_text = extract_text(data, mime_type, filename)
+            model_text, anonymization_result, review_reason = prepare_text_for_remote_processing(
+                extracted_text,
+                filename=filename,
+                mime_type=mime_type,
+                raw_data=data,
+            )
+            if review_reason or not model_text:
+                return (
+                    f"Could not read '{filename}' safely because anonymized text is unavailable: "
+                    f"{review_reason or 'empty document text'}."
+                )
+            if anonymization_result:
+                upsert_anonymized_document(
+                    drive_file_id=file_id,
+                    content_sha256=anonymization_result.content_sha256,
+                    original_filename=filename,
+                    mime_type=mime_type,
+                    sanitized_text=anonymization_result.sanitized_text,
+                    backend=anonymization_result.backend,
+                    model=anonymization_result.model,
+                    replacement_counts=anonymization_result.replacement_counts,
+                    truncated=anonymization_result.truncated,
+                )
+            text = model_text
+        elif mime_type.startswith("image/"):
             text = describe_image(data, mime_type)
         else:
             text = extract_text(data, mime_type, filename)
@@ -1002,7 +1047,7 @@ class JarvisAgent:
         # Truncate to avoid blowing context window
         max_chars = 8000
         if len(text) > max_chars:
-            text = text[:max_chars] + f"\n\n[...truncated — {len(text) - max_chars} more chars]"
+            text = text[:max_chars] + f"\n\n[...truncated - {len(text) - max_chars} more chars]"
         return f"Contents of '{filename}':\n\n{text}"
 
     def _tool_create_note(self, inputs: dict) -> str:

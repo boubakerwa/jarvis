@@ -150,9 +150,11 @@ def _record_gmail_activity(email, outcome: str, reason: str = "", details: Optio
 
 def _handle_email(email, memory_manager, drive_client) -> EmailProcessingResult:
     """Process a new email: check relevance, then classify attachments and file to Drive."""
-    from agent_sdk.filer import classify_attachment
+    from agent_sdk.filer import build_review_classification, classify_attachment
     from gmail.relevance import is_worth_filing
     from memory.schema import MemoryCategory, MemoryConfidence, MemoryRecord, MemorySource
+    from utils.anonymization import prepare_text_for_remote_processing
+    from utils.anonymization_store import upsert_anonymized_document
     from utils.financial_extraction import extract_financial_data
 
     op_id = new_op_id("email")
@@ -208,12 +210,44 @@ def _handle_email(email, memory_manager, drive_client) -> EmailProcessingResult:
 
         for attachment in email.attachments:
             try:
-                classification = classify_attachment(
-                    attachment.filename,
-                    attachment.mime_type,
+                model_text, anonymization_result, review_reason = prepare_text_for_remote_processing(
                     attachment.text_content,
+                    filename=attachment.filename,
+                    mime_type=attachment.mime_type,
                     raw_data=attachment.data,
                 )
+                if review_reason:
+                    if "local anonymization" in review_reason:
+                        record_issue(
+                            level="WARNING",
+                            event="email_attachment_manual_review",
+                            component="gmail",
+                            status="warning",
+                            summary="Attachment routed to manual review because local anonymization was unavailable",
+                            metadata={
+                                "message_id": email.message_id,
+                                "filename": attachment.filename,
+                                "reason": review_reason,
+                            },
+                        )
+                        review_summary = (
+                            "Document stored for manual review because local anonymization was unavailable."
+                        )
+                    else:
+                        review_summary = (
+                            "Document stored for manual review because text extraction did not produce anonymization-safe text."
+                        )
+                    classification = build_review_classification(
+                        attachment.filename,
+                        summary=review_summary,
+                    )
+                else:
+                    classification = classify_attachment(
+                        attachment.filename,
+                        attachment.mime_type,
+                        model_text,
+                        raw_data=attachment.data,
+                    )
                 folder_id = drive_client.get_or_create_folder_path(
                     classification.top_level, classification.sub_folder
                 )
@@ -233,9 +267,22 @@ def _handle_email(email, memory_manager, drive_client) -> EmailProcessingResult:
                 )
                 memory_manager.upsert(record)
 
+                if anonymization_result and anonymization_result.sanitized_text.strip():
+                    upsert_anonymized_document(
+                        drive_file_id=drive_file_id,
+                        content_sha256=anonymization_result.content_sha256,
+                        original_filename=classification.filename,
+                        mime_type=attachment.mime_type,
+                        sanitized_text=anonymization_result.sanitized_text,
+                        backend=anonymization_result.backend,
+                        model=anonymization_result.model,
+                        replacement_counts=anonymization_result.replacement_counts,
+                        truncated=anonymization_result.truncated,
+                    )
+
                 # Extract financial data for finance-classified documents
-                if classification.top_level == "Finances" and attachment.text_content:
-                    financial = extract_financial_data(attachment.text_content, classification.filename)
+                if classification.top_level == "Finances" and model_text:
+                    financial = extract_financial_data(model_text, classification.filename)
                     if financial:
                         memory_manager.add_financial_record(
                             vendor=financial["vendor"],

@@ -10,6 +10,7 @@ import os
 import re
 from dataclasses import dataclass
 
+from config import settings
 from core.structured_output import generate_validated_json
 from storage.schema import TOP_LEVEL_FOLDERS, build_classification_prompt
 
@@ -67,6 +68,19 @@ def _validate_classification_payload(data: dict, original_filename: str) -> Clas
     )
 
 
+def build_review_classification(
+    original_filename: str,
+    *,
+    summary: str = "Document stored for manual review because anonymization-safe processing was unavailable.",
+) -> ClassificationResult:
+    return ClassificationResult(
+        top_level="Misc",
+        sub_folder="Needs Review",
+        filename=_sanitize_filename("needs_review_document", original_filename),
+        summary=summary[:280],
+    )
+
+
 def classify_attachment(
     original_filename: str,
     mime_type: str,
@@ -79,6 +93,8 @@ def classify_attachment(
     Returns a ClassificationResult with the target Drive path and filename.
     """
     if mime_type.startswith("image/") and not text_content and raw_data:
+        if settings.JARVIS_ANONYMIZATION_ENABLED:
+            raise ValueError("image-only documents require a local-safe review fallback while anonymization is enabled")
         from utils.text_extraction import describe_image
         text_content = describe_image(raw_data, mime_type)
 

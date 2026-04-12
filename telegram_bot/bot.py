@@ -630,12 +630,39 @@ class TelegramBot:
                 tg_file = await context.bot.get_file(file_id)
                 data = bytes(await tg_file.download_as_bytearray())
 
-                from agent_sdk.filer import classify_attachment
+                from agent_sdk.filer import build_review_classification, classify_attachment
                 from memory.schema import MemoryCategory, MemoryConfidence, MemoryRecord, MemorySource
+                from utils.anonymization import prepare_text_for_remote_processing
+                from utils.anonymization_store import upsert_anonymized_document
                 from utils.text_extraction import extract_text
 
                 text_content = extract_text(data, mime_type, filename)
-                classification = classify_attachment(filename, mime_type, text_content, raw_data=data)
+                model_text, anonymization_result, review_reason = prepare_text_for_remote_processing(
+                    text_content,
+                    filename=filename,
+                    mime_type=mime_type,
+                    raw_data=data,
+                )
+                if review_reason:
+                    if "local anonymization" in review_reason:
+                        record_issue(
+                            level="WARNING",
+                            event="telegram_file_manual_review",
+                            component="telegram",
+                            status="warning",
+                            summary="Telegram document routed to manual review because local anonymization was unavailable",
+                            metadata={"filename": filename, "mime_type": mime_type, "reason": review_reason},
+                        )
+                        review_summary = (
+                            "Document stored for manual review because local anonymization was unavailable."
+                        )
+                    else:
+                        review_summary = (
+                            "Document stored for manual review because text extraction did not produce anonymization-safe text."
+                        )
+                    classification = build_review_classification(filename, summary=review_summary)
+                else:
+                    classification = classify_attachment(filename, mime_type, model_text, raw_data=data)
 
                 folder_id = self._drive.get_or_create_folder_path(
                     classification.top_level, classification.sub_folder
@@ -652,9 +679,22 @@ class TelegramBot:
                 )
                 self._memory.upsert(record)
 
-                if classification.top_level == "Finances" and text_content:
+                if anonymization_result and anonymization_result.sanitized_text.strip():
+                    upsert_anonymized_document(
+                        drive_file_id=drive_file_id,
+                        content_sha256=anonymization_result.content_sha256,
+                        original_filename=classification.filename,
+                        mime_type=mime_type,
+                        sanitized_text=anonymization_result.sanitized_text,
+                        backend=anonymization_result.backend,
+                        model=anonymization_result.model,
+                        replacement_counts=anonymization_result.replacement_counts,
+                        truncated=anonymization_result.truncated,
+                    )
+
+                if classification.top_level == "Finances" and model_text:
                     from utils.financial_extraction import extract_financial_data
-                    financial = extract_financial_data(text_content, classification.filename)
+                    financial = extract_financial_data(model_text, classification.filename)
                     if financial:
                         self._memory.add_financial_record(
                             vendor=financial["vendor"],

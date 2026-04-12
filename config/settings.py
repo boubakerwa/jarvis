@@ -65,6 +65,12 @@ OBSIDIAN_VAULT_PATH: str = os.getenv("OBSIDIAN_VAULT_PATH", "").strip()
 OBSIDIAN_ROOT_FOLDER: str = os.getenv("OBSIDIAN_ROOT_FOLDER", "Marvis").strip()
 JARVIS_MORNING_DIGEST_ENABLED: bool = _env_bool("JARVIS_MORNING_DIGEST_ENABLED", True)
 JARVIS_MORNING_TIME: str = os.getenv("JARVIS_MORNING_TIME", "09:00").strip()
+JARVIS_ANONYMIZATION_ENABLED: bool = _env_bool("JARVIS_ANONYMIZATION_ENABLED", False)
+JARVIS_ANONYMIZATION_FAIL_CLOSED: bool = _env_bool("JARVIS_ANONYMIZATION_FAIL_CLOSED", True)
+JARVIS_ANONYMIZATION_MAX_CHARS: int = int(os.getenv("JARVIS_ANONYMIZATION_MAX_CHARS", "12000"))
+OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").strip()
+OLLAMA_MODEL_ANONYMIZER: str = os.getenv("OLLAMA_MODEL_ANONYMIZER", "").strip()
+OLLAMA_TIMEOUT_SECONDS: int = int(os.getenv("OLLAMA_TIMEOUT_SECONDS", "120"))
 
 # Prevent the Anthropic SDK from picking up a legacy first-party API key when routing via OpenRouter.
 os.environ.pop("ANTHROPIC_API_KEY", None)
