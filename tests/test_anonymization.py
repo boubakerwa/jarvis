@@ -39,6 +39,7 @@ class AnonymizationTests(unittest.TestCase):
             JARVIS_ANONYMIZATION_ENABLED=True,
             JARVIS_ANONYMIZATION_FAIL_CLOSED=True,
             JARVIS_ANONYMIZATION_MAX_CHARS=12000,
+            JARVIS_ANONYMIZATION_CHUNK_CHARS=2500,
             OLLAMA_MODEL_ANONYMIZER="gemma3:12b",
             OLLAMA_BASE_URL="http://127.0.0.1:11434",
             OLLAMA_TIMEOUT_SECONDS=30,
@@ -95,6 +96,7 @@ class AnonymizationTests(unittest.TestCase):
             JARVIS_ANONYMIZATION_ENABLED=True,
             JARVIS_ANONYMIZATION_FAIL_CLOSED=True,
             JARVIS_ANONYMIZATION_MAX_CHARS=12000,
+            JARVIS_ANONYMIZATION_CHUNK_CHARS=2500,
             OLLAMA_MODEL_ANONYMIZER="gemma3:12b",
             OLLAMA_BASE_URL="http://127.0.0.1:11434",
             OLLAMA_TIMEOUT_SECONDS=30,
@@ -128,6 +130,51 @@ class AnonymizationTests(unittest.TestCase):
         self.assertEqual(text, "")
         self.assertIsNone(result)
         self.assertIn("anonymization-safe text", review_reason)
+
+    def test_anonymize_text_chunks_large_documents(self):
+        fake_settings = types.SimpleNamespace(
+            JARVIS_ANONYMIZATION_ENABLED=True,
+            JARVIS_ANONYMIZATION_FAIL_CLOSED=True,
+            JARVIS_ANONYMIZATION_MAX_CHARS=12000,
+            JARVIS_ANONYMIZATION_CHUNK_CHARS=60,
+            OLLAMA_MODEL_ANONYMIZER="gemma3:12b",
+            OLLAMA_BASE_URL="http://127.0.0.1:11434",
+            OLLAMA_TIMEOUT_SECONDS=30,
+        )
+        fake_config = types.ModuleType("config")
+        fake_config.settings = fake_settings
+
+        fake_core = types.ModuleType("core")
+        fake_core.__path__ = []
+        fake_opslog = types.ModuleType("core.opslog")
+        fake_opslog.record_activity = lambda **_kwargs: None
+        fake_opslog.record_issue = lambda **_kwargs: None
+
+        with unittest.mock.patch.dict(
+            sys.modules,
+            {
+                "config": fake_config,
+                "core": fake_core,
+                "core.opslog": fake_opslog,
+            },
+            clear=False,
+        ):
+            module = load_module("tested_anonymization_chunking", "utils/anonymization.py")
+
+        calls = []
+
+        def fake_urlopen(req, timeout):
+            calls.append(req.full_url)
+            if req.full_url.endswith("/api/ps"):
+                return _FakeHTTPResponse({"models": []})
+            return _FakeHTTPResponse({"response": "Sanitized chunk"})
+
+        text = ("Paragraph one with john@example.com and invoice metadata.\n\n" * 20).strip()
+        with patch.object(module.urllib_request, "urlopen", side_effect=fake_urlopen):
+            result = module.anonymize_text(text, filename="invoice.pdf", mime_type="application/pdf")
+
+        self.assertEqual(result.backend, "ollama")
+        self.assertGreaterEqual(len(calls), 3)
 
 
 if __name__ == "__main__":

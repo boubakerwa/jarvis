@@ -12,9 +12,19 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any
 
-from telegram import Bot, BotCommand, BotCommandScopeChat, Document, PhotoSize, Update
+from telegram import (
+    Bot,
+    BotCommand,
+    BotCommandScopeChat,
+    Document,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    PhotoSize,
+    Update,
+)
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -57,19 +67,23 @@ class TelegramProactiveNotifier:
         self._bot = bot
         self._max_message_length = max(1, max_message_length)
 
-    def send_message(self, text: str) -> bool:
+    def send_message(self, text: str, *, reply_markup: InlineKeyboardMarkup | None = None) -> bool:
         message = text.strip()
         if not self._enabled or not message:
             return False
 
         try:
             chunks = _split_message(message, self._max_message_length)
-            asyncio.run(self._send_chunks(chunks))
+            asyncio.run(self._send_chunks(chunks, reply_markup=reply_markup))
             record_activity(
                 event="telegram_proactive_message_sent",
                 component="telegram",
                 summary="Sent proactive Telegram message",
-                metadata={"message_length": len(message), "chunk_count": len(chunks)},
+                metadata={
+                    "message_length": len(message),
+                    "chunk_count": len(chunks),
+                    "has_inline_actions": bool(reply_markup),
+                },
             )
             return True
         except Exception as exc:
@@ -84,27 +98,37 @@ class TelegramProactiveNotifier:
             )
             return False
 
-    async def _send_chunks(self, chunks: list[str]) -> None:
+    async def _send_chunks(self, chunks: list[str], *, reply_markup: InlineKeyboardMarkup | None = None) -> None:
         if self._bot is not None:
-            for chunk in chunks:
-                await self._bot.send_message(chat_id=self._chat_id, text=chunk)
+            for index, chunk in enumerate(chunks):
+                await self._bot.send_message(
+                    chat_id=self._chat_id,
+                    text=chunk,
+                    reply_markup=reply_markup if index == len(chunks) - 1 else None,
+                )
             return
 
         # Create a short-lived bot session per proactive send so the underlying
         # HTTP client is initialized and shut down within the same event loop.
         async with Bot(token=self._bot_token) as bot:
-            for chunk in chunks:
-                await bot.send_message(chat_id=self._chat_id, text=chunk)
+            for index, chunk in enumerate(chunks):
+                await bot.send_message(
+                    chat_id=self._chat_id,
+                    text=chunk,
+                    reply_markup=reply_markup if index == len(chunks) - 1 else None,
+                )
 
 
 class TelegramBot:
-    def __init__(self, agent, memory_manager, drive_client=None, calendar_client=None, notes_manager=None, reminder_manager=None, linkedin_drive=None):
+    def __init__(self, agent, memory_manager, drive_client=None, calendar_client=None, notes_manager=None, reminder_manager=None, chat_reset_manager=None, linkedin_drive=None):
         self._agent = agent
         self._memory = memory_manager
         self._drive = drive_client
         self._calendar = calendar_client
         self._notes = notes_manager
         self._reminders = reminder_manager
+        self._chat_reset = chat_reset_manager
+        self._background_tasks: set[asyncio.Task] = set()
         self._app = (
             Application.builder()
             .token(settings.TELEGRAM_BOT_TOKEN)
@@ -132,6 +156,7 @@ class TelegramBot:
         self._app.add_handler(CommandHandler("status", self._cmd_status, filters=allow))
         self._app.add_handler(CommandHandler("llmops", self._cmd_llmops, filters=allow))
         self._app.add_handler(CommandHandler("linkedin", self._cmd_linkedin, filters=allow))
+        self._app.add_handler(CallbackQueryHandler(self._handle_callback_query, pattern=r"^(reminder|chatreset):"))
 
         # File/photo uploads
         self._app.add_handler(
@@ -244,6 +269,8 @@ class TelegramBot:
 
     async def _cmd_reset(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         self._agent.reset_history()
+        if self._chat_reset:
+            self._chat_reset.reset_session(now=datetime.now(timezone.utc))
         await update.message.reply_text("Conversation history cleared. Long-term memories are intact.")
 
     async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -561,6 +588,7 @@ class TelegramBot:
 
     async def _handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_text = update.message.text
+        was_history_empty = self._agent.history_is_empty() if hasattr(self._agent, "history_is_empty") else False
         logger.info("Received message from %s", update.effective_user.id)
         op_id = new_op_id("telegram-message")
         with operation_context(op_id):
@@ -588,6 +616,14 @@ class TelegramBot:
             response_with_cost = response.rstrip() + "\n\n" + _total_cost_footer()
             for chunk in _split_message(response_with_cost, 4096):
                 await update.message.reply_text(chunk)
+            if self._chat_reset and was_history_empty:
+                session = self._chat_reset.start_session(now=datetime.now(timezone.utc), force_new=True)
+                record_activity(
+                    event="chat_reset_session_started",
+                    component="telegram",
+                    summary="Started chat-reset reminder schedule from first message",
+                    metadata={"session_id": session["id"]},
+                )
             record_activity(
                 event="telegram_message_replied",
                 component="telegram",
@@ -595,16 +631,109 @@ class TelegramBot:
                 metadata={"chunk_count": len(_split_message(response_with_cost, 4096))},
             )
 
+    async def _handle_callback_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        query = update.callback_query
+        if query is None:
+            return
+
+        op_id = new_op_id("telegram-callback")
+        with operation_context(op_id):
+            await query.answer()
+            prefix, action, target_id = _parse_callback_data(query.data or "")
+            if prefix == "reminder":
+                await self._handle_reminder_callback(query, action, target_id)
+                return
+            if prefix == "chatreset":
+                await self._handle_chat_reset_callback(query, action, target_id)
+                return
+            else:
+                await query.edit_message_text("This reminder action is no longer available.")
+                return
+
+    async def _handle_reminder_callback(self, query, action: str, reminder_id: str) -> None:
+        if not action or not reminder_id or not self._reminders:
+            await query.edit_message_text("This reminder action is no longer available.")
+            return
+
+        now = datetime.now(timezone.utc)
+        if action == "done":
+            reminder = self._reminders.mark_completed(reminder_id, now=now)
+            if reminder and self._memory and reminder.get("task_id"):
+                self._memory.complete_task(reminder["task_id"])
+            status_text = "Marked done."
+        elif action == "later":
+            reminder = self._reminders.snooze_reminder(reminder_id, now=now)
+            status_text = (
+                f"Okay, I’ll remind you again {self._describe_follow_up(reminder)}."
+                if reminder is not None
+                else ""
+            )
+        else:
+            reminder = None
+            status_text = ""
+
+        if reminder is None:
+            await query.edit_message_text("This reminder is no longer available.")
+            return
+
+        await query.edit_message_text(_render_callback_acknowledgement(reminder, status_text))
+        record_activity(
+            event="telegram_reminder_callback_handled",
+            component="telegram",
+            summary="Handled Telegram reminder action without agent invocation",
+            metadata={"action": action, "reminder_id": reminder["id"]},
+        )
+
+    async def _handle_chat_reset_callback(self, query, action: str, session_id: str) -> None:
+        if not action or not session_id or not self._chat_reset:
+            await query.edit_message_text("This chat-reset action is no longer available.")
+            return
+
+        now = datetime.now(timezone.utc)
+        if action == "reset":
+            self._agent.reset_history()
+            session = self._chat_reset.reset_session(session_id, now=now)
+            text = "Chat reset. Context cleared and reminders stopped."
+        elif action == "dismiss":
+            session = self._chat_reset.dismiss_session(session_id, now=now)
+            text = "Chat-reset reminders dismissed for this session."
+        else:
+            session = None
+            text = ""
+
+        if session is None:
+            await query.edit_message_text("This chat-reset session is no longer available.")
+            return
+
+        await query.edit_message_text(text)
+        record_activity(
+            event="telegram_chat_reset_callback_handled",
+            component="telegram",
+            summary="Handled chat-reset reminder action without agent invocation",
+            metadata={"action": action, "session_id": session["id"]},
+        )
+
+    def _describe_follow_up(self, reminder: dict) -> str:
+        next_run_at = str(reminder.get("next_run_at") or "").replace("Z", "+00:00")
+        try:
+            dt = datetime.fromisoformat(next_run_at)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return "later"
+        local_dt = dt.astimezone()
+        return f"at {local_dt.strftime('%H:%M %Z on %Y-%m-%d')}"
+
     async def _handle_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         doc: Document = update.message.document
-        await self._file_to_drive(update, context, doc.file_id, doc.file_name, doc.mime_type)
+        await self._queue_file_to_drive(update, context, doc.file_id, doc.file_name, doc.mime_type)
 
     async def _handle_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         # Use highest resolution photo
         photo: PhotoSize = update.message.photo[-1]
-        await self._file_to_drive(update, context, photo.file_id, f"photo_{photo.file_id}.jpg", "image/jpeg")
+        await self._queue_file_to_drive(update, context, photo.file_id, f"photo_{photo.file_id}.jpg", "image/jpeg")
 
-    async def _file_to_drive(
+    async def _queue_file_to_drive(
         self,
         update: Update,
         context: ContextTypes.DEFAULT_TYPE,
@@ -616,6 +745,29 @@ class TelegramBot:
             await update.message.reply_text("Drive not initialised, cannot file document.")
             return
 
+        chat_id = getattr(getattr(update, "effective_chat", None), "id", settings.TELEGRAM_ALLOWED_USER_ID)
+        await update.message.reply_text(f"Queued {filename} for filing. I'll send the result once processing finishes.")
+        record_activity(
+            event="telegram_file_queued",
+            component="telegram",
+            summary="Queued Telegram file for background processing",
+            metadata={"filename": filename, "mime_type": mime_type},
+        )
+
+        task = asyncio.create_task(self._file_to_drive(context, chat_id, file_id, filename, mime_type))
+        if not hasattr(self, "_background_tasks"):
+            self._background_tasks = set()
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def _file_to_drive(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        chat_id: int,
+        file_id: str,
+        filename: str,
+        mime_type: str,
+    ) -> None:
         op_id = new_op_id("telegram-file")
         with operation_context(op_id):
             record_activity(
@@ -624,13 +776,12 @@ class TelegramBot:
                 summary="Received Telegram file for Drive filing",
                 metadata={"filename": filename, "mime_type": mime_type},
             )
-            await update.message.reply_text(f"Filing {filename}...")
 
             try:
                 tg_file = await context.bot.get_file(file_id)
                 data = bytes(await tg_file.download_as_bytearray())
 
-                from agent_sdk.filer import build_review_classification, classify_attachment
+                from agent_sdk.filer import classify_attachment, classify_attachment_locally
                 from memory.schema import MemoryCategory, MemoryConfidence, MemoryRecord, MemorySource
                 from utils.anonymization import prepare_text_for_remote_processing
                 from utils.anonymization_store import upsert_anonymized_document
@@ -644,23 +795,20 @@ class TelegramBot:
                     raw_data=data,
                 )
                 if review_reason:
-                    if "local anonymization" in review_reason:
-                        record_issue(
-                            level="WARNING",
-                            event="telegram_file_manual_review",
-                            component="telegram",
-                            status="warning",
-                            summary="Telegram document routed to manual review because local anonymization was unavailable",
-                            metadata={"filename": filename, "mime_type": mime_type, "reason": review_reason},
-                        )
-                        review_summary = (
-                            "Document stored for manual review because local anonymization was unavailable."
-                        )
-                    else:
-                        review_summary = (
-                            "Document stored for manual review because text extraction did not produce anonymization-safe text."
-                        )
-                    classification = build_review_classification(filename, summary=review_summary)
+                    record_issue(
+                        level="WARNING",
+                        event="telegram_file_local_classification_fallback",
+                        component="telegram",
+                        status="warning",
+                        summary="Telegram document classified locally because anonymized text was unavailable",
+                        metadata={"filename": filename, "mime_type": mime_type, "reason": review_reason},
+                    )
+                    classification = classify_attachment_locally(
+                        filename,
+                        mime_type,
+                        text_content,
+                        summary_reason=review_reason,
+                    )
                 else:
                     classification = classify_attachment(filename, mime_type, model_text, raw_data=data)
 
@@ -707,9 +855,12 @@ class TelegramBot:
                             source="telegram",
                         )
 
-                await update.message.reply_text(
-                    f"Filed to *{classification.top_level}/{classification.sub_folder}/{classification.filename}*\n"
-                    f"{classification.summary}",
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        f"Filed to *{classification.top_level}/{classification.sub_folder}/{classification.filename}*\n"
+                        f"{classification.summary}"
+                    ),
                     parse_mode="Markdown",
                 )
                 record_activity(
@@ -734,7 +885,7 @@ class TelegramBot:
                     summary="Failed to file Telegram document",
                     metadata={"filename": filename, "mime_type": mime_type, "error": str(e)},
                 )
-                await update.message.reply_text(f"Failed to file document: {e}")
+                await context.bot.send_message(chat_id=chat_id, text=f"Failed to file document: {e}")
 
 
 # ------------------------------------------------------------------
@@ -750,6 +901,24 @@ def _split_message(text: str, max_len: int) -> list[str]:
         chunks.append(text[:max_len])
         text = text[max_len:]
     return chunks
+
+
+def _parse_callback_data(data: str) -> tuple[str, str, str]:
+    parts = str(data or "").split(":", 2)
+    if len(parts) != 3:
+        return "", "", ""
+    return parts[0], parts[1], parts[2]
+
+
+def _render_callback_acknowledgement(reminder: dict, status_text: str) -> str:
+    lines = [status_text.strip()] if status_text.strip() else []
+    message = str(reminder.get("message") or "").strip()
+    if message:
+        lines.append(f"Reminder: {message}")
+    task_id = str(reminder.get("task_id") or "").strip()
+    if task_id:
+        lines.append(f"Task: {task_id[:8]}")
+    return "\n".join(lines) if lines else "Reminder updated."
 
 
 def _parse_int(value: Any) -> int:

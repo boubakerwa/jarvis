@@ -575,6 +575,9 @@ class JarvisAgent:
     def reset_history(self) -> None:
         self._history.clear()
 
+    def history_is_empty(self) -> bool:
+        return len(self._history) == 0
+
     # ------------------------------------------------------------------
     # Private — agent loop
     # ------------------------------------------------------------------
@@ -1187,7 +1190,8 @@ class JarvisAgent:
             short_id = t["id"][:8]
             due_str = f" [due: {t['due_date']}]" if t.get("due_date") else ""
             status_str = f" [{t['status']}]" if status == "all" else ""
-            lines.append(f"- [{short_id}]{due_str}{status_str} {t['description']}")
+            source_str = " [reminder]" if status == "all" and t.get("source") == "reminder" else ""
+            lines.append(f"- [{short_id}]{due_str}{status_str}{source_str} {t['description']}")
         return "\n".join(lines)
 
     def _tool_complete_task(self, inputs: dict) -> str:

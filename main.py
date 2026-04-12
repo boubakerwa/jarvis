@@ -150,7 +150,7 @@ def _record_gmail_activity(email, outcome: str, reason: str = "", details: Optio
 
 def _handle_email(email, memory_manager, drive_client) -> EmailProcessingResult:
     """Process a new email: check relevance, then classify attachments and file to Drive."""
-    from agent_sdk.filer import build_review_classification, classify_attachment
+    from agent_sdk.filer import classify_attachment, classify_attachment_locally
     from gmail.relevance import is_worth_filing
     from memory.schema import MemoryCategory, MemoryConfidence, MemoryRecord, MemorySource
     from utils.anonymization import prepare_text_for_remote_processing
@@ -217,29 +217,23 @@ def _handle_email(email, memory_manager, drive_client) -> EmailProcessingResult:
                     raw_data=attachment.data,
                 )
                 if review_reason:
-                    if "local anonymization" in review_reason:
-                        record_issue(
-                            level="WARNING",
-                            event="email_attachment_manual_review",
-                            component="gmail",
-                            status="warning",
-                            summary="Attachment routed to manual review because local anonymization was unavailable",
-                            metadata={
-                                "message_id": email.message_id,
-                                "filename": attachment.filename,
-                                "reason": review_reason,
-                            },
-                        )
-                        review_summary = (
-                            "Document stored for manual review because local anonymization was unavailable."
-                        )
-                    else:
-                        review_summary = (
-                            "Document stored for manual review because text extraction did not produce anonymization-safe text."
-                        )
-                    classification = build_review_classification(
+                    record_issue(
+                        level="WARNING",
+                        event="email_attachment_local_classification_fallback",
+                        component="gmail",
+                        status="warning",
+                        summary="Attachment classified locally because anonymized text was unavailable",
+                        metadata={
+                            "message_id": email.message_id,
+                            "filename": attachment.filename,
+                            "reason": review_reason,
+                        },
+                    )
+                    classification = classify_attachment_locally(
                         attachment.filename,
-                        summary=review_summary,
+                        attachment.mime_type,
+                        attachment.text_content or "",
+                        summary_reason=review_reason,
                     )
                 else:
                     classification = classify_attachment(
@@ -438,8 +432,9 @@ def main():
     record_audit(event="memory_ready", component="memory", summary="Memory manager initialised")
 
     # Reminders
-    from reminders import ReminderManager
+    from reminders import ChatResetSessionManager, ReminderManager
     reminder_manager = ReminderManager()
+    chat_reset_manager = ChatResetSessionManager()
     logger.info("Reminder manager initialised")
     record_audit(event="reminders_ready", component="reminders", summary="Reminder manager initialised")
 
@@ -495,6 +490,7 @@ def main():
         calendar_client=calendar_client,
         notes_manager=notes_manager,
         reminder_manager=reminder_manager,
+        chat_reset_manager=chat_reset_manager,
     )
     logger.info("Agent initialised")
     record_audit(event="agent_ready", component="agent", summary="Agent initialised")
@@ -517,7 +513,7 @@ def main():
     )
     record_audit(event="telegram_ready", component="telegram", summary="Telegram bot initialised")
 
-    from reminders import ReminderDeliveryRunner
+    from reminders import ChatResetDeliveryRunner, ReminderDeliveryRunner
     reminder_runner = ReminderDeliveryRunner(
         reminder_manager=reminder_manager,
         notifier=proactive_notifier,
@@ -532,6 +528,22 @@ def main():
         event="reminder_delivery_started",
         component="reminders",
         summary="Reminder delivery loop started",
+    )
+
+    chat_reset_runner = ChatResetDeliveryRunner(
+        session_manager=chat_reset_manager,
+        notifier=proactive_notifier,
+    )
+    chat_reset_thread = threading.Thread(
+        target=chat_reset_runner.run_forever,
+        daemon=True,
+        name="chat-reset-delivery",
+    )
+    chat_reset_thread.start()
+    record_activity(
+        event="chat_reset_delivery_started",
+        component="telegram",
+        summary="Chat-reset reminder delivery loop started",
     )
 
     # LinkedIn processor cron (every 15 minutes)

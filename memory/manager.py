@@ -36,6 +36,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     description TEXT NOT NULL,
     due_date TEXT,
     status TEXT NOT NULL DEFAULT 'pending',
+    source TEXT NOT NULL DEFAULT 'manual',
+    surfaced INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     completed_at TEXT
 );
@@ -72,6 +74,7 @@ class MemoryManager:
         self._db.executescript(_CREATE_TASKS_TABLE)
         self._db.executescript(_CREATE_FINANCIAL_TABLE)
         self._db.commit()
+        self._ensure_task_columns()
 
         self._chroma = chromadb.PersistentClient(path=settings.JARVIS_CHROMA_PATH)
         self._collection = self._chroma.get_or_create_collection(
@@ -161,13 +164,23 @@ class MemoryManager:
     # Tasks
     # ------------------------------------------------------------------
 
-    def create_task(self, description: str, due_date: Optional[str] = None) -> dict:
+    def create_task(
+        self,
+        description: str,
+        due_date: Optional[str] = None,
+        *,
+        source: str = "manual",
+        surfaced: bool = True,
+    ) -> dict:
         import uuid
         task_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
         self._db.execute(
-            "INSERT INTO tasks (id, description, due_date, status, created_at) VALUES (?, ?, ?, 'pending', ?)",
-            (task_id, description, due_date, now),
+            """
+            INSERT INTO tasks (id, description, due_date, status, source, surfaced, created_at)
+            VALUES (?, ?, ?, 'pending', ?, ?, ?)
+            """,
+            (task_id, description, due_date, source, 1 if surfaced else 0, now),
         )
         self._db.commit()
         logger.info("Task created: %s", description[:60])
@@ -175,9 +188,16 @@ class MemoryManager:
             event="task_created",
             component="memory",
             summary="Created task",
-            metadata={"due_date": due_date or ""},
+            metadata={"due_date": due_date or "", "source": source, "surfaced": surfaced},
         )
-        return {"id": task_id, "description": description, "due_date": due_date, "status": "pending"}
+        return {
+            "id": task_id,
+            "description": description,
+            "due_date": due_date,
+            "status": "pending",
+            "source": source,
+            "surfaced": 1 if surfaced else 0,
+        }
 
     def list_tasks(self, status: str = "pending") -> list[dict]:
         if status == "all":
@@ -186,7 +206,7 @@ class MemoryManager:
             ).fetchall()
         else:
             rows = self._db.execute(
-                "SELECT * FROM tasks WHERE status=? ORDER BY due_date, created_at",
+                "SELECT * FROM tasks WHERE status=? AND surfaced=1 ORDER BY due_date, created_at",
                 (status,),
             ).fetchall()
         return [dict(r) for r in rows]
@@ -218,6 +238,16 @@ class MemoryManager:
                 metadata={"task_id": task_id},
             )
         return cursor.rowcount > 0
+
+    def _ensure_task_columns(self) -> None:
+        columns = {
+            row["name"] for row in self._db.execute("PRAGMA table_info(tasks)").fetchall()
+        }
+        if "source" not in columns:
+            self._db.execute("ALTER TABLE tasks ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'")
+        if "surfaced" not in columns:
+            self._db.execute("ALTER TABLE tasks ADD COLUMN surfaced INTEGER NOT NULL DEFAULT 1")
+        self._db.commit()
 
     # ------------------------------------------------------------------
     # Financial records
