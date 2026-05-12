@@ -54,6 +54,9 @@ OPENROUTER_MODEL_RELEVANCE: str | None = _optional_model("OPENROUTER_MODEL_RELEV
 OPENROUTER_MODEL_FINANCIAL: str | None = _optional_model("OPENROUTER_MODEL_FINANCIAL")
 OPENROUTER_MODEL_CLASSIFICATION: str | None = _optional_model("OPENROUTER_MODEL_CLASSIFICATION")
 OPENROUTER_MODEL_VISION: str | None = _optional_model("OPENROUTER_MODEL_VISION")
+LANGFUSE_PUBLIC_KEY: str = os.getenv("LANGFUSE_PUBLIC_KEY", "").strip()
+LANGFUSE_SECRET_KEY: str = os.getenv("LANGFUSE_SECRET_KEY", "").strip()
+LANGFUSE_BASE_URL: str = os.getenv("LANGFUSE_BASE_URL", "https://cloud.langfuse.com").strip()
 MAX_TOKENS: int = int(os.getenv("MAX_TOKENS", "4096"))
 GMAIL_POLL_INTERVAL: int = int(os.getenv("GMAIL_POLL_INTERVAL", "300"))
 GMAIL_START_DATE: str = os.getenv("GMAIL_START_DATE", "").strip()
@@ -72,6 +75,8 @@ JARVIS_ANONYMIZATION_CHUNK_CHARS: int = int(os.getenv("JARVIS_ANONYMIZATION_CHUN
 OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").strip()
 OLLAMA_MODEL_ANONYMIZER: str = os.getenv("OLLAMA_MODEL_ANONYMIZER", "").strip()
 OLLAMA_TIMEOUT_SECONDS: int = int(os.getenv("OLLAMA_TIMEOUT_SECONDS", "120"))
+JARVIS_LANGFUSE_ENABLED: bool = _env_bool("JARVIS_LANGFUSE_ENABLED", False)
+JARVIS_LANGFUSE_CAPTURE_CONTENT: bool = _env_bool("JARVIS_LANGFUSE_CAPTURE_CONTENT", False)
 
 # Prevent the Anthropic SDK from picking up a legacy first-party API key when routing via OpenRouter.
 os.environ.pop("ANTHROPIC_API_KEY", None)

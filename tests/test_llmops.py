@@ -58,6 +58,26 @@ class LLMOpsTests(unittest.TestCase):
         self.assertAlmostEqual(payload["estimated_cost_usd"], 0.006)
         self.assertEqual(payload["metadata"]["tool_use_count"], 1)
 
+    def test_estimate_cost_breakdown_matches_total(self):
+        module = load_module("tested_llmops_breakdown", "core/llmops.py")
+
+        usage = {
+            "input_tokens": 1000,
+            "output_tokens": 200,
+            "cache_creation_input_tokens": 50,
+            "cache_read_input_tokens": 25,
+            "total_tokens": 1275,
+        }
+
+        breakdown = module.estimate_cost_breakdown_usd("anthropic/claude-sonnet-4.6", usage)
+
+        self.assertIsNotNone(breakdown)
+        assert breakdown is not None
+        self.assertAlmostEqual(breakdown["input"], 0.003225)
+        self.assertAlmostEqual(breakdown["output"], 0.003)
+        self.assertAlmostEqual(breakdown["total"], 0.006225)
+        self.assertAlmostEqual(module.estimate_cost_usd("anthropic/claude-sonnet-4.6", usage), breakdown["total"])
+
 
 if __name__ == "__main__":
     unittest.main()

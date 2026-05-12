@@ -22,6 +22,7 @@ from core.opslog import (
     record_audit,
     record_issue,
 )
+from core.tracing import start_span, start_trace, summarize_text
 
 # Ensure data/ and logs/ directories exist before anything else
 os.makedirs("data", exist_ok=True)
@@ -160,255 +161,277 @@ def _handle_email(email, memory_manager, drive_client) -> EmailProcessingResult:
     op_id = new_op_id("email")
     started = monotonic()
     with operation_context(op_id):
-        record_activity(
-            event="email_processing_started",
-            component="gmail",
-            summary="Processing incoming email",
+        with start_trace(
+            name="gmail-email",
+            session_id="gmail-watcher",
+            input={
+                "subject": summarize_text(email.subject or "", label="email-subject"),
+                "sender": summarize_text(email.sender or "", label="email-sender"),
+                "attachment_count": len(email.attachments),
+            },
             metadata={
+                "channel": "gmail",
+                "task": "gmail-email",
+                "op_id": op_id,
                 "message_id": email.message_id,
                 "attachment_count": len(email.attachments),
             },
-        )
-        logger.info(
-            "Processing email: from=%s subject=%s attachments=%d",
-            email.sender,
-            email.subject,
-            len(email.attachments),
-        )
-
-        should_file, reason = is_worth_filing(email)
-        if not should_file:
-            logger.info("Skipping email (not worth filing): %s — %s", email.subject, reason)
+            tags=["gmail"],
+        ):
             record_activity(
-                event="email_processing_skipped",
+                event="email_processing_started",
                 component="gmail",
-                status="skipped",
-                summary="Email skipped after filing relevance check",
-                duration_ms=(monotonic() - started) * 1000,
-                metadata={"message_id": email.message_id},
+                summary="Processing incoming email",
+                metadata={
+                    "message_id": email.message_id,
+                    "attachment_count": len(email.attachments),
+                },
             )
-            _record_gmail_activity(email, "skipped", reason)
-            return EmailProcessingResult(outcome="skipped", reason=reason)
-
-        logger.info("Filing email: %s — %s", email.subject, reason)
-        if not email.attachments:
-            logger.info("Email marked worth filing but has no attachments: %s", email.subject)
-            record_issue(
-                level="WARNING",
-                event="email_missing_attachments",
-                component="gmail",
-                status="warning",
-                summary="Email marked for filing had no attachments",
-                duration_ms=(monotonic() - started) * 1000,
-                metadata={"message_id": email.message_id},
+            logger.info(
+                "Processing email: from=%s subject=%s attachments=%d",
+                email.sender,
+                email.subject,
+                len(email.attachments),
             )
-            _record_gmail_activity(email, "no_attachments", reason)
-            return EmailProcessingResult(outcome="no_attachments", reason=reason)
 
-        filed_attachments: list[dict] = []
-        failed_attachments: list[dict] = []
+            should_file, reason = is_worth_filing(email)
+            if not should_file:
+                logger.info("Skipping email (not worth filing): %s — %s", email.subject, reason)
+                record_activity(
+                    event="email_processing_skipped",
+                    component="gmail",
+                    status="skipped",
+                    summary="Email skipped after filing relevance check",
+                    duration_ms=(monotonic() - started) * 1000,
+                    metadata={"message_id": email.message_id},
+                )
+                _record_gmail_activity(email, "skipped", reason)
+                return EmailProcessingResult(outcome="skipped", reason=reason)
 
-        for attachment in email.attachments:
-            try:
-                model_text, anonymization_result, review_reason = prepare_text_for_remote_processing(
-                    attachment.text_content,
-                    filename=attachment.filename,
-                    mime_type=attachment.mime_type,
-                    raw_data=attachment.data,
+            logger.info("Filing email: %s — %s", email.subject, reason)
+            if not email.attachments:
+                logger.info("Email marked worth filing but has no attachments: %s", email.subject)
+                record_issue(
+                    level="WARNING",
+                    event="email_missing_attachments",
+                    component="gmail",
+                    status="warning",
+                    summary="Email marked for filing had no attachments",
+                    duration_ms=(monotonic() - started) * 1000,
+                    metadata={"message_id": email.message_id},
                 )
-                if review_reason:
-                    record_issue(
-                        level="WARNING",
-                        event="email_attachment_local_classification_fallback",
-                        component="gmail",
-                        status="warning",
-                        summary="Attachment classified locally because anonymized text was unavailable",
-                        metadata={
-                            "message_id": email.message_id,
-                            "filename": attachment.filename,
-                            "reason": review_reason,
-                        },
-                    )
-                    classification = classify_attachment_locally(
-                        attachment.filename,
-                        attachment.mime_type,
-                        attachment.text_content or "",
-                        summary_reason=review_reason,
-                    )
-                else:
-                    classification = classify_attachment(
-                        attachment.filename,
-                        attachment.mime_type,
-                        model_text,
-                        raw_data=attachment.data,
-                    )
-                folder_id = drive_client.get_or_create_folder_path(
-                    classification.top_level, classification.sub_folder
-                )
-                drive_file_id = drive_client.upload_bytes(
-                    attachment.data,
-                    classification.filename,
-                    folder_id,
-                    attachment.mime_type,
-                )
-                record = MemoryRecord(
-                    topic=f"file:{classification.filename}",
-                    summary=classification.summary,
-                    category=MemoryCategory.DOCUMENT_REF,
-                    source=MemorySource.EMAIL,
-                    confidence=MemoryConfidence.HIGH,
-                    document_ref=drive_file_id,
-                )
-                memory_manager.upsert(record)
+                _record_gmail_activity(email, "no_attachments", reason)
+                return EmailProcessingResult(outcome="no_attachments", reason=reason)
 
-                if anonymization_result and anonymization_result.sanitized_text.strip():
-                    upsert_anonymized_document(
-                        drive_file_id=drive_file_id,
-                        content_sha256=anonymization_result.content_sha256,
-                        original_filename=classification.filename,
-                        mime_type=attachment.mime_type,
-                        sanitized_text=anonymization_result.sanitized_text,
-                        backend=anonymization_result.backend,
-                        model=anonymization_result.model,
-                        replacement_counts=anonymization_result.replacement_counts,
-                        truncated=anonymization_result.truncated,
-                    )
+            filed_attachments: list[dict] = []
+            failed_attachments: list[dict] = []
 
-                # Extract financial data for finance-classified documents
-                if classification.top_level == "Finances" and model_text:
-                    financial = extract_financial_data(model_text, classification.filename)
-                    if financial:
-                        memory_manager.add_financial_record(
-                            vendor=financial["vendor"],
-                            amount=financial["amount"],
-                            currency=financial["currency"],
-                            category=financial["category"],
-                            date=financial["date"],
-                            description=classification.summary,
-                            drive_file_id=drive_file_id,
-                            source="email",
+            for attachment in email.attachments:
+                with start_span(
+                    name="gmail-attachment",
+                    input={"filename": attachment.filename, "mime_type": attachment.mime_type},
+                    metadata={"message_id": email.message_id},
+                ):
+                    try:
+                        model_text, anonymization_result, review_reason = prepare_text_for_remote_processing(
+                            attachment.text_content,
+                            filename=attachment.filename,
+                            mime_type=attachment.mime_type,
+                            raw_data=attachment.data,
+                        )
+                        if review_reason:
+                            record_issue(
+                                level="WARNING",
+                                event="email_attachment_local_classification_fallback",
+                                component="gmail",
+                                status="warning",
+                                summary="Attachment classified locally because anonymized text was unavailable",
+                                metadata={
+                                    "message_id": email.message_id,
+                                    "filename": attachment.filename,
+                                    "reason": review_reason,
+                                },
+                            )
+                            classification = classify_attachment_locally(
+                                attachment.filename,
+                                attachment.mime_type,
+                                attachment.text_content or "",
+                                summary_reason=review_reason,
+                            )
+                        else:
+                            classification = classify_attachment(
+                                attachment.filename,
+                                attachment.mime_type,
+                                model_text,
+                                raw_data=attachment.data,
+                            )
+                        folder_id = drive_client.get_or_create_folder_path(
+                            classification.top_level, classification.sub_folder
+                        )
+                        drive_file_id = drive_client.upload_bytes(
+                            attachment.data,
+                            classification.filename,
+                            folder_id,
+                            attachment.mime_type,
+                        )
+                        record = MemoryRecord(
+                            topic=f"file:{classification.filename}",
+                            summary=classification.summary,
+                            category=MemoryCategory.DOCUMENT_REF,
+                            source=MemorySource.EMAIL,
+                            confidence=MemoryConfidence.HIGH,
+                            document_ref=drive_file_id,
+                        )
+                        memory_manager.upsert(record)
+
+                        if anonymization_result and anonymization_result.sanitized_text.strip():
+                            upsert_anonymized_document(
+                                drive_file_id=drive_file_id,
+                                content_sha256=anonymization_result.content_sha256,
+                                original_filename=classification.filename,
+                                mime_type=attachment.mime_type,
+                                sanitized_text=anonymization_result.sanitized_text,
+                                backend=anonymization_result.backend,
+                                model=anonymization_result.model,
+                                replacement_counts=anonymization_result.replacement_counts,
+                                truncated=anonymization_result.truncated,
+                            )
+
+                        # Extract financial data for finance-classified documents
+                        if classification.top_level == "Finances" and model_text:
+                            financial = extract_financial_data(model_text, classification.filename)
+                            if financial:
+                                memory_manager.add_financial_record(
+                                    vendor=financial["vendor"],
+                                    amount=financial["amount"],
+                                    currency=financial["currency"],
+                                    category=financial["category"],
+                                    date=financial["date"],
+                                    description=classification.summary,
+                                    drive_file_id=drive_file_id,
+                                    source="email",
+                                )
+
+                        logger.info(
+                            "Filed attachment '%s' -> %s/%s (Drive ID: %s)",
+                            attachment.filename,
+                            classification.top_level,
+                            classification.sub_folder,
+                            drive_file_id,
+                        )
+                        filed_attachments.append(
+                            {
+                                "original_filename": attachment.filename,
+                                "stored_filename": classification.filename,
+                                "top_level": classification.top_level,
+                                "sub_folder": classification.sub_folder,
+                                "drive_file_id": drive_file_id,
+                            }
+                        )
+                    except Exception as e:
+                        logger.exception("Failed to file attachment: %s", attachment.filename)
+                        record_issue(
+                            level="ERROR",
+                            event="email_attachment_filing_failed",
+                            component="gmail",
+                            status="error",
+                            summary="Failed to classify or store email attachment",
+                            metadata={
+                                "message_id": email.message_id,
+                                "filename": attachment.filename,
+                                "error": str(e),
+                            },
+                        )
+                        failed_attachments.append(
+                            {
+                                "filename": attachment.filename,
+                                "error": str(e),
+                            }
                         )
 
-                logger.info(
-                    "Filed attachment '%s' -> %s/%s (Drive ID: %s)",
-                    attachment.filename,
-                    classification.top_level,
-                    classification.sub_folder,
-                    drive_file_id,
-                )
-                filed_attachments.append(
-                    {
-                        "original_filename": attachment.filename,
-                        "stored_filename": classification.filename,
-                        "top_level": classification.top_level,
-                        "sub_folder": classification.sub_folder,
-                        "drive_file_id": drive_file_id,
-                    }
-                )
-            except Exception as e:
-                logger.exception("Failed to file attachment: %s", attachment.filename)
+            duration_ms = (monotonic() - started) * 1000
+            if filed_attachments and failed_attachments:
                 record_issue(
-                    level="ERROR",
-                    event="email_attachment_filing_failed",
+                    level="WARNING",
+                    event="email_processing_partial",
                     component="gmail",
-                    status="error",
-                    summary="Failed to classify or store email attachment",
+                    status="partial",
+                    summary="Email processing completed with partial failures",
+                    duration_ms=duration_ms,
                     metadata={
                         "message_id": email.message_id,
-                        "filename": attachment.filename,
-                        "error": str(e),
+                        "filed_count": len(filed_attachments),
+                        "failed_count": len(failed_attachments),
                     },
                 )
-                failed_attachments.append(
-                    {
-                        "filename": attachment.filename,
-                        "error": str(e),
-                    }
+                _record_gmail_activity(
+                    email,
+                    "partial",
+                    reason,
+                    {"filed_attachments": filed_attachments, "failed_attachments": failed_attachments},
                 )
-
-        duration_ms = (monotonic() - started) * 1000
-        if filed_attachments and failed_attachments:
-            record_issue(
-                level="WARNING",
-                event="email_processing_partial",
-                component="gmail",
-                status="partial",
-                summary="Email processing completed with partial failures",
-                duration_ms=duration_ms,
-                metadata={
-                    "message_id": email.message_id,
-                    "filed_count": len(filed_attachments),
-                    "failed_count": len(failed_attachments),
-                },
-            )
-            _record_gmail_activity(
-                email,
-                "partial",
-                reason,
-                {"filed_attachments": filed_attachments, "failed_attachments": failed_attachments},
-            )
-            return EmailProcessingResult(
-                outcome="partial",
-                reason=reason,
-                filed_count=len(filed_attachments),
-                failed_count=len(failed_attachments),
-            )
-        elif filed_attachments:
-            record_activity(
-                event="email_processing_completed",
-                component="gmail",
-                status="filed",
-                summary="Email attachments filed successfully",
-                duration_ms=duration_ms,
-                metadata={
-                    "message_id": email.message_id,
-                    "filed_count": len(filed_attachments),
-                },
-            )
-            record_audit(
-                event="email_filed",
-                component="gmail",
-                summary="Stored email attachment(s) in Drive",
-                metadata={
-                    "message_id": email.message_id,
-                    "filed_count": len(filed_attachments),
-                },
-            )
-            _record_gmail_activity(
-                email,
-                "filed",
-                reason,
-                {"filed_attachments": filed_attachments},
-            )
-            return EmailProcessingResult(
-                outcome="filed",
-                reason=reason,
-                filed_count=len(filed_attachments),
-            )
-        else:
-            record_issue(
-                level="ERROR",
-                event="email_processing_failed",
-                component="gmail",
-                status="failed",
-                summary="Email processing failed before any attachment could be stored",
-                duration_ms=duration_ms,
-                metadata={
-                    "message_id": email.message_id,
-                    "failed_count": len(failed_attachments),
-                },
-            )
-            _record_gmail_activity(
-                email,
-                "failed",
-                reason,
-                {"failed_attachments": failed_attachments},
-            )
-            return EmailProcessingResult(
-                outcome="failed",
-                reason=reason,
-                failed_count=len(failed_attachments),
-            )
+                return EmailProcessingResult(
+                    outcome="partial",
+                    reason=reason,
+                    filed_count=len(filed_attachments),
+                    failed_count=len(failed_attachments),
+                )
+            elif filed_attachments:
+                record_activity(
+                    event="email_processing_completed",
+                    component="gmail",
+                    status="filed",
+                    summary="Email attachments filed successfully",
+                    duration_ms=duration_ms,
+                    metadata={
+                        "message_id": email.message_id,
+                        "filed_count": len(filed_attachments),
+                    },
+                )
+                record_audit(
+                    event="email_filed",
+                    component="gmail",
+                    summary="Stored email attachment(s) in Drive",
+                    metadata={
+                        "message_id": email.message_id,
+                        "filed_count": len(filed_attachments),
+                    },
+                )
+                _record_gmail_activity(
+                    email,
+                    "filed",
+                    reason,
+                    {"filed_attachments": filed_attachments},
+                )
+                return EmailProcessingResult(
+                    outcome="filed",
+                    reason=reason,
+                    filed_count=len(filed_attachments),
+                )
+            else:
+                record_issue(
+                    level="ERROR",
+                    event="email_processing_failed",
+                    component="gmail",
+                    status="failed",
+                    summary="Email processing failed before any attachment could be stored",
+                    duration_ms=duration_ms,
+                    metadata={
+                        "message_id": email.message_id,
+                        "failed_count": len(failed_attachments),
+                    },
+                )
+                _record_gmail_activity(
+                    email,
+                    "failed",
+                    reason,
+                    {"failed_attachments": failed_attachments},
+                )
+                return EmailProcessingResult(
+                    outcome="failed",
+                    reason=reason,
+                    failed_count=len(failed_attachments),
+                )
 
 
 def _heartbeat_loop() -> None:
@@ -507,13 +530,14 @@ def main():
         calendar_client=calendar_client,
         notes_manager=notes_manager,
         reminder_manager=reminder_manager,
+        chat_reset_manager=chat_reset_manager,
     )
     proactive_notifier = TelegramProactiveNotifier(
         enabled=True,
     )
     record_audit(event="telegram_ready", component="telegram", summary="Telegram bot initialised")
 
-    from reminders import ChatResetDeliveryRunner, ReminderDeliveryRunner
+    from reminders import ReminderDeliveryRunner
     reminder_runner = ReminderDeliveryRunner(
         reminder_manager=reminder_manager,
         notifier=proactive_notifier,
@@ -528,22 +552,6 @@ def main():
         event="reminder_delivery_started",
         component="reminders",
         summary="Reminder delivery loop started",
-    )
-
-    chat_reset_runner = ChatResetDeliveryRunner(
-        session_manager=chat_reset_manager,
-        notifier=proactive_notifier,
-    )
-    chat_reset_thread = threading.Thread(
-        target=chat_reset_runner.run_forever,
-        daemon=True,
-        name="chat-reset-delivery",
-    )
-    chat_reset_thread.start()
-    record_activity(
-        event="chat_reset_delivery_started",
-        component="telegram",
-        summary="Chat-reset reminder delivery loop started",
     )
 
     # LinkedIn processor cron (every 15 minutes)

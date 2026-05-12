@@ -8,7 +8,7 @@ import chromadb
 
 from config import settings
 from core.opslog import record_audit
-from memory.schema import MemoryCategory, MemoryRecord
+from memory.schema import MemoryCategory, MemoryRecord, MemorySearchResult
 
 logger = logging.getLogger(__name__)
 
@@ -124,20 +124,36 @@ class MemoryManager:
 
     def search(self, query: str, n_results: int = 8) -> list[MemoryRecord]:
         """Semantic search over active memories."""
+        return [result.record for result in self.search_scored(query, n_results=n_results)]
+
+    def search_scored(self, query: str, n_results: int = 8) -> list[MemorySearchResult]:
+        """Semantic search over active memories with optional distance metadata."""
         try:
+            count = self._collection.count()
+            if count <= 0:
+                return []
             results = self._collection.query(
                 query_texts=[query],
-                n_results=min(n_results, self._collection.count()),
+                n_results=min(n_results, count),
                 where={"active": 1},
+                include=["distances"],
             )
         except Exception:
             return []
 
-        records = []
-        for doc_id in (results["ids"][0] if results["ids"] else []):
+        records: list[MemorySearchResult] = []
+        ids = results.get("ids") or []
+        distances = results.get("distances") or []
+        for index, doc_id in enumerate(ids[0] if ids else []):
             row = self._sqlite_get(doc_id)
             if row:
-                records.append(row)
+                distance = None
+                if distances and distances[0] and index < len(distances[0]):
+                    try:
+                        distance = float(distances[0][index])
+                    except (TypeError, ValueError):
+                        distance = None
+                records.append(MemorySearchResult(record=row, distance=distance))
         return records
 
     def list_all(self, category: Optional[MemoryCategory] = None) -> list[MemoryRecord]:

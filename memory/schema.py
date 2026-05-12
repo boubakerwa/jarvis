@@ -74,3 +74,9 @@ class MemoryRecord:
             updated_at=d["updated_at"],
             active=bool(d.get("active", 1)),
         )
+
+
+@dataclass(frozen=True)
+class MemorySearchResult:
+    record: MemoryRecord
+    distance: Optional[float] = None

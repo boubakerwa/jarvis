@@ -36,6 +36,21 @@ class SourceReaderTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 read_source_file("data.bin", root=root)
 
+    def test_read_source_file_supports_line_ranges(self):
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            target = root / "core" / "example.py"
+            target.parent.mkdir(parents=True)
+            target.write_text("one\ntwo\nthree\nfour\nfive\n", encoding="utf-8")
+
+            result = read_source_file("core/example.py", root=root, start_line=2, end_line=4, max_chars=1000)
+
+        self.assertEqual(result["content"], "two\nthree\nfour")
+        self.assertEqual(result["start_line"], 2)
+        self.assertEqual(result["end_line"], 4)
+        self.assertEqual(result["total_lines"], 5)
+        self.assertFalse(result["truncated"])
+
 
 if __name__ == "__main__":
     unittest.main()

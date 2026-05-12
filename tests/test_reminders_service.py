@@ -241,49 +241,63 @@ class ReminderServiceTests(unittest.TestCase):
 
             self.assertEqual(notifier.messages[1][0], "Escalation test: Finish taxes")
 
-    def test_chat_reset_session_uses_absolute_schedule_offsets(self):
+    def test_chat_reset_session_uses_exchange_schedule_thresholds(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = self.module.ChatResetSessionManager(db_path=str(Path(tmpdir) / "jarvis.db"))
 
             session = manager.start_session(now=self.now, force_new=True)
-            self.assertEqual(session["next_run_at"], "2026-04-05T10:03:00+00:00")
+            self.assertEqual(session["exchange_count"], 0)
+            self.assertEqual(session["next_trigger_exchange"], 3)
 
-            first = manager.mark_sent(session, now=datetime(2026, 4, 5, 12, 3, tzinfo=ZoneInfo("Europe/Berlin")))
-            self.assertEqual(first["sent_count"], 1)
-            self.assertEqual(first["next_run_at"], "2026-04-05T10:10:00+00:00")
+            first = manager.record_exchange(session["id"], now=self.now)
+            self.assertIsNotNone(first)
+            assert first is not None
+            self.assertEqual(first["exchange_count"], 1)
+            self.assertFalse(manager.reminder_due(first))
 
-            second = manager.mark_sent(first, now=datetime(2026, 4, 5, 12, 10, tzinfo=ZoneInfo("Europe/Berlin")))
-            self.assertEqual(second["sent_count"], 2)
-            self.assertEqual(second["next_run_at"], "2026-04-05T10:15:00+00:00")
+            second = manager.record_exchange(session["id"], now=self.now)
+            self.assertIsNotNone(second)
+            assert second is not None
+            self.assertEqual(second["exchange_count"], 2)
+            self.assertFalse(manager.reminder_due(second))
 
-            third = manager.mark_sent(second, now=datetime(2026, 4, 5, 12, 15, tzinfo=ZoneInfo("Europe/Berlin")))
-            self.assertEqual(third["sent_count"], 3)
-            self.assertEqual(third["next_run_at"], "2026-04-05T10:20:00+00:00")
+            third = manager.record_exchange(session["id"], now=self.now)
+            self.assertIsNotNone(third)
+            assert third is not None
+            self.assertEqual(third["exchange_count"], 3)
+            self.assertTrue(manager.reminder_due(third))
 
-    def test_chat_reset_runner_sends_two_button_message(self):
+            after_first_send = manager.mark_sent(third, now=self.now)
+            self.assertEqual(after_first_send["sent_count"], 1)
+            self.assertEqual(after_first_send["next_trigger_exchange"], 10)
+
+            after_second_send = manager.mark_sent(after_first_send, now=self.now)
+            self.assertEqual(after_second_send["sent_count"], 2)
+            self.assertEqual(after_second_send["next_trigger_exchange"], 15)
+
+            after_third_send = manager.mark_sent(after_second_send, now=self.now)
+            self.assertEqual(after_third_send["sent_count"], 3)
+            self.assertEqual(after_third_send["next_trigger_exchange"], 20)
+
+            after_fourth_send = manager.mark_sent(after_third_send, now=self.now)
+            self.assertEqual(after_fourth_send["sent_count"], 4)
+            self.assertEqual(after_fourth_send["next_trigger_exchange"], 25)
+
+    def test_chat_reset_delivery_text_escalates_by_exchange_stage(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = self.module.ChatResetSessionManager(db_path=str(Path(tmpdir) / "jarvis.db"))
             session = manager.start_session(now=self.now, force_new=True)
-            notifier = FakeNotifier()
-            runner = self.module.ChatResetDeliveryRunner(
-                session_manager=manager,
-                notifier=notifier,
-                poll_interval_seconds=1,
-            )
 
-            delivered = runner.run_once(now=datetime(2026, 4, 5, 12, 4, tzinfo=ZoneInfo("Europe/Berlin")))
+            self.assertIn("3 exchanges", manager.build_delivery_text(session))
 
-            self.assertEqual(delivered, 1)
-            self.assertEqual(len(notifier.messages), 1)
-            self.assertIn("reset", notifier.messages[0][0].lower())
-            reply_markup = notifier.messages[0][1]
-            self.assertIsNotNone(reply_markup)
-            assert reply_markup is not None
-            self.assertEqual(len(reply_markup.inline_keyboard), 1)
-            self.assertEqual(len(reply_markup.inline_keyboard[0]), 2)
-            updated = manager.get_session(session["id"])
-            self.assertIsNotNone(updated)
-            self.assertEqual(updated["sent_count"], 1)
+            first_sent = manager.mark_sent(session, now=self.now)
+            self.assertIn("10 exchanges", manager.build_delivery_text(first_sent))
+
+            second_sent = manager.mark_sent(first_sent, now=self.now)
+            self.assertIn("15 exchanges", manager.build_delivery_text(second_sent))
+
+            third_sent = manager.mark_sent(second_sent, now=self.now)
+            self.assertIn("Another 5 exchanges", manager.build_delivery_text(third_sent))
 
 
 if __name__ == "__main__":

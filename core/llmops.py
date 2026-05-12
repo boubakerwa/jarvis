@@ -65,6 +65,13 @@ def usage_from_response(response: Any) -> dict[str, int]:
 
 
 def estimate_cost_usd(model: str, usage: dict[str, int]) -> float | None:
+    breakdown = estimate_cost_breakdown_usd(model, usage)
+    if not breakdown:
+        return None
+    return breakdown["total"]
+
+
+def estimate_cost_breakdown_usd(model: str, usage: dict[str, int]) -> dict[str, float] | None:
     input_cost_per_million, output_cost_per_million = _MODEL_PRICE_HINTS_PER_MILLION.get(model, (None, None))
     if input_cost_per_million is None or output_cost_per_million is None:
         return None
@@ -74,11 +81,14 @@ def estimate_cost_usd(model: str, usage: dict[str, int]) -> float | None:
         + usage.get("cache_creation_input_tokens", 0)
         + usage.get("cache_read_input_tokens", 0)
     )
-    estimated_cost = (
-        (billable_input_tokens / _TOKENS_PER_MILLION) * input_cost_per_million
-        + (usage.get("output_tokens", 0) / _TOKENS_PER_MILLION) * output_cost_per_million
-    )
-    return round(estimated_cost, 6)
+    input_cost = (billable_input_tokens / _TOKENS_PER_MILLION) * input_cost_per_million
+    output_cost = (usage.get("output_tokens", 0) / _TOKENS_PER_MILLION) * output_cost_per_million
+    estimated_cost = input_cost + output_cost
+    return {
+        "input": round(input_cost, 6),
+        "output": round(output_cost, 6),
+        "total": round(estimated_cost, 6),
+    }
 
 
 def record_llm_call(

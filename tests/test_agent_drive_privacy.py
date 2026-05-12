@@ -2,6 +2,7 @@ import importlib.util
 import sys
 import types
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -27,6 +28,22 @@ class _DummyMemoryRecord:
         self.__dict__.update(kwargs)
 
 
+class _DummyObservation:
+    def update(self, **_kwargs):
+        return self
+
+    def update_trace(self, **_kwargs):
+        return self
+
+    def end(self, **_kwargs):
+        return self
+
+
+@contextmanager
+def _dummy_context_manager(**_kwargs):
+    yield _DummyObservation()
+
+
 class AgentDrivePrivacyTests(unittest.TestCase):
     def test_read_drive_file_prefers_anonymized_sidecar_when_enabled(self):
         fake_settings = types.SimpleNamespace(MAX_TOKENS=256, JARVIS_ANONYMIZATION_ENABLED=True)
@@ -41,7 +58,7 @@ class AgentDrivePrivacyTests(unittest.TestCase):
         fake_github.load_github_client_config = lambda: None
 
         fake_core = types.ModuleType("core")
-        fake_core.__path__ = []
+        fake_core.__path__ = [str(ROOT / "core")]
         fake_log_reader = types.ModuleType("core.log_reader")
         fake_log_reader.read_logs = lambda **_kwargs: []
         fake_llmops = types.ModuleType("core.llmops")
@@ -51,9 +68,18 @@ class AgentDrivePrivacyTests(unittest.TestCase):
         fake_llm_client.create_llm_client = lambda: None
         fake_llm_client.get_model_name = lambda *_args, **_kwargs: "unused"
         fake_prompts = types.ModuleType("core.prompts")
-        fake_prompts.build_system_prompt = lambda *_args, **_kwargs: "unused"
+        fake_prompts.PromptBuildResult = object
+        fake_prompts.build_system_prompt_result = lambda *_args, **_kwargs: "unused"
         fake_source_reader = types.ModuleType("core.source_reader")
         fake_source_reader.read_source_file = lambda _path: {"path": "unused", "content": "", "truncated": False}
+        fake_tracing = types.ModuleType("core.tracing")
+        fake_tracing.generation_cost_details = lambda *_args, **_kwargs: None
+        fake_tracing.generation_usage_details = lambda *_args, **_kwargs: {}
+        fake_tracing.start_generation = _dummy_context_manager
+        fake_tracing.start_span = _dummy_context_manager
+        fake_tracing.start_tool_observation = _dummy_context_manager
+        fake_tracing.start_trace = _dummy_context_manager
+        fake_tracing.summarize_text = lambda text, **_kwargs: {"chars": len(str(text or ""))}
         fake_time_utils = types.ModuleType("core.time_utils")
         fake_time_utils.contains_explicit_date = lambda _text: False
         fake_time_utils.day_bounds_for_calendar = lambda *_args, **_kwargs: ("", "")
@@ -63,7 +89,7 @@ class AgentDrivePrivacyTests(unittest.TestCase):
         fake_time_utils.resolve_event_time = lambda *_args, **_kwargs: None
 
         fake_memory = types.ModuleType("memory")
-        fake_memory.__path__ = []
+        fake_memory.__path__ = [str(ROOT / "memory")]
         fake_memory_manager = types.ModuleType("memory.manager")
         fake_memory_manager.MemoryManager = object
         fake_memory_schema = types.ModuleType("memory.schema")
@@ -92,6 +118,7 @@ class AgentDrivePrivacyTests(unittest.TestCase):
                 "core.llm_client": fake_llm_client,
                 "core.prompts": fake_prompts,
                 "core.source_reader": fake_source_reader,
+                "core.tracing": fake_tracing,
                 "core.time_utils": fake_time_utils,
                 "memory": fake_memory,
                 "memory.manager": fake_memory_manager,

@@ -1,0 +1,30 @@
+{
+  "call_count": 649,
+  "ok_call_count": 457,
+  "task_totals": [
+    {
+      "task": "chat",
+      "total_tokens": 1717770
+    },
+    {
+      "task": "relevance",
+      "total_tokens": 65413
+    },
+    {
+      "task": "classification",
+      "total_tokens": 4695
+    },
+    {
+      "task": "linkedin_draft",
+      "total_tokens": 0
+    }
+  ],
+  "chat": {
+    "call_count": 331,
+    "avg_input_tokens": 5015.69,
+    "avg_output_tokens": 173.95,
+    "avg_total_tokens": 5189.64,
+    "median_input_tokens": 4849,
+    "p90_input_tokens": 7125
+  }
+}

@@ -22,10 +22,12 @@ class AgentReadOnlyToolTests(unittest.TestCase):
 
     def test_read_source_file_tool_formats_contents(self):
         agent = self.module.JarvisAgent.__new__(self.module.JarvisAgent)
-        self.module.read_project_source_file = lambda path: {
+        self.module.read_project_source_file = lambda path, start_line=None, end_line=None: {
             "path": "core/agent.py",
             "content": "print('hi')",
             "truncated": False,
+            "start_line": start_line,
+            "end_line": end_line,
         }
 
         response = agent._tool_read_source_file({"path": "core/agent.py"})
@@ -53,12 +55,32 @@ class AgentReadOnlyToolTests(unittest.TestCase):
 
         self.assertIn("reminders::reminder_send_failed", response)
         self.assertIn("Reminder failed", response)
+        self.assertNotIn("metadata=", response)
+
+    def test_read_logs_tool_includes_metadata_only_when_requested(self):
+        agent = self.module.JarvisAgent.__new__(self.module.JarvisAgent)
+        self.module.query_logs = lambda **_kwargs: [
+            {
+                "ts": "2026-04-10T12:00:00+00:00",
+                "level": "ERROR",
+                "component": "reminders",
+                "event": "reminder_send_failed",
+                "summary": "Reminder failed",
+                "source": "ops_issues",
+                "status": "warning",
+                "op_id": "reminder-123",
+                "metadata": {"reminder_id": "abc"},
+            }
+        ]
+
+        response = agent._tool_read_logs({"level": "ERROR", "limit": 5, "include_metadata": True})
+
         self.assertIn("metadata=", response)
 
     def test_read_source_file_tool_surfaces_sandbox_errors(self):
         agent = self.module.JarvisAgent.__new__(self.module.JarvisAgent)
 
-        def _raise(_path):
+        def _raise(_path, start_line=None, end_line=None):
             raise ValueError("Path must stay within the Marvis project root")
 
         self.module.read_project_source_file = _raise

@@ -22,6 +22,7 @@ from telegram import (
     PhotoSize,
     Update,
 )
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -47,6 +48,17 @@ from core.opslog import (
 )
 
 logger = logging.getLogger(__name__)
+
+_STALE_CALLBACK_PATTERNS = (
+    "query is too old",
+    "response timeout expired",
+    "query id is invalid",
+)
+
+
+def _is_stale_callback_error(exc: Exception) -> bool:
+    message = str(exc or "").lower()
+    return any(pattern in message for pattern in _STALE_CALLBACK_PATTERNS)
 
 
 class TelegramProactiveNotifier:
@@ -600,7 +612,15 @@ class TelegramBot:
             )
             await update.message.chat.send_action("typing")
             try:
-                response = self._agent.chat(user_text)
+                chat_id = getattr(getattr(update, "effective_chat", None), "id", settings.TELEGRAM_ALLOWED_USER_ID)
+                user_id = getattr(getattr(update, "effective_user", None), "id", settings.TELEGRAM_ALLOWED_USER_ID)
+                response = self._agent.chat(
+                    user_text,
+                    session_id=f"telegram:{chat_id}",
+                    user_id=str(user_id),
+                    trace_metadata={"channel": "telegram", "op_id": op_id},
+                    trace_tags=["telegram", "chat"],
+                )
             except Exception as e:
                 logger.exception("Agent error")
                 record_issue(
@@ -616,19 +636,82 @@ class TelegramBot:
             response_with_cost = response.rstrip() + "\n\n" + _total_cost_footer()
             for chunk in _split_message(response_with_cost, 4096):
                 await update.message.reply_text(chunk)
-            if self._chat_reset and was_history_empty:
-                session = self._chat_reset.start_session(now=datetime.now(timezone.utc), force_new=True)
-                record_activity(
-                    event="chat_reset_session_started",
-                    component="telegram",
-                    summary="Started chat-reset reminder schedule from first message",
-                    metadata={"session_id": session["id"]},
-                )
+            if self._chat_reset:
+                now = datetime.now(timezone.utc)
+                session = None
+                if was_history_empty:
+                    session = self._chat_reset.start_session(now=now, force_new=True)
+                    record_activity(
+                        event="chat_reset_session_started",
+                        component="telegram",
+                        summary="Started chat-reset exchange tracking from first message",
+                        metadata={"session_id": session["id"]},
+                    )
+                await self._maybe_send_chat_reset_reminder(update, session=session, now=now)
             record_activity(
                 event="telegram_message_replied",
                 component="telegram",
                 summary="Sent Telegram chat reply",
                 metadata={"chunk_count": len(_split_message(response_with_cost, 4096))},
+            )
+
+    async def _maybe_send_chat_reset_reminder(
+        self,
+        update: Update,
+        *,
+        session: dict | None = None,
+        now: datetime,
+    ) -> None:
+        if not self._chat_reset:
+            return
+
+        tracked_session = self._chat_reset.record_exchange(
+            session["id"] if session else None,
+            now=now,
+        )
+        if tracked_session is None or not self._chat_reset.reminder_due(tracked_session):
+            return
+
+        try:
+            await update.message.reply_text(
+                self._chat_reset.build_delivery_text(tracked_session),
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton(
+                                "Reset Chat",
+                                callback_data=f"chatreset:reset:{tracked_session['id']}",
+                            ),
+                            InlineKeyboardButton(
+                                "Dismiss",
+                                callback_data=f"chatreset:dismiss:{tracked_session['id']}",
+                            ),
+                        ]
+                    ]
+                ),
+            )
+            updated = self._chat_reset.mark_sent(tracked_session, now=now)
+            record_activity(
+                event="chat_reset_reminder_sent",
+                component="telegram",
+                summary="Sent exchange-based chat-reset reminder",
+                metadata={
+                    "session_id": tracked_session["id"],
+                    "exchange_count": tracked_session.get("exchange_count", 0),
+                    "sent_count": updated.get("sent_count", 0),
+                    "next_trigger_exchange": updated.get("next_trigger_exchange", 0),
+                },
+            )
+        except Exception as exc:
+            self._chat_reset.mark_delivery_failed(tracked_session["id"], str(exc), now=now)
+            logger.exception("Failed to send chat-reset reminder")
+            record_issue(
+                level="ERROR",
+                event="chat_reset_reminder_send_failed",
+                component="telegram",
+                status="error",
+                summary="Failed to send exchange-based chat-reset reminder",
+                metadata={"session_id": tracked_session["id"], "error": str(exc)},
             )
 
     async def _handle_callback_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -638,7 +721,19 @@ class TelegramBot:
 
         op_id = new_op_id("telegram-callback")
         with operation_context(op_id):
-            await query.answer()
+            try:
+                await query.answer()
+            except BadRequest as exc:
+                if not _is_stale_callback_error(exc):
+                    raise
+                logger.info("Ignoring stale Telegram callback query: %s", exc)
+                record_activity(
+                    event="telegram_callback_query_expired",
+                    component="telegram",
+                    summary="Ignored expired Telegram callback query acknowledgement",
+                    op_id=op_id,
+                    metadata={"error": str(exc)[:200]},
+                )
             prefix, action, target_id = _parse_callback_data(query.data or "")
             if prefix == "reminder":
                 await self._handle_reminder_callback(query, action, target_id)

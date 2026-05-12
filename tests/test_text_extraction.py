@@ -2,6 +2,7 @@ import importlib.util
 import sys
 import types
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -18,6 +19,19 @@ def load_module(module_name: str, relative_path: str):
     return module
 
 
+class _DummyObservation:
+    def update(self, **_kwargs):
+        return self
+
+    def end(self, **_kwargs):
+        return self
+
+
+@contextmanager
+def _dummy_context_manager(**_kwargs):
+    yield _DummyObservation()
+
+
 class TextExtractionTests(unittest.TestCase):
     def test_extract_pdf_text_prefers_local_ocr_when_pypdf_text_is_weak(self):
         fake_core = types.ModuleType("core")
@@ -32,6 +46,11 @@ class TextExtractionTests(unittest.TestCase):
         fake_opslog.record_issue = lambda **_kwargs: None
         fake_structured_output = types.ModuleType("core.structured_output")
         fake_structured_output.response_text = lambda _response: ""
+        fake_tracing = types.ModuleType("core.tracing")
+        fake_tracing.generation_cost_details = lambda *_args, **_kwargs: None
+        fake_tracing.generation_usage_details = lambda *_args, **_kwargs: {}
+        fake_tracing.start_generation = _dummy_context_manager
+        fake_tracing.summarize_bytes = lambda data, **_kwargs: {"bytes": len(data or b"")}
 
         with unittest.mock.patch.dict(
             sys.modules,
@@ -41,6 +60,7 @@ class TextExtractionTests(unittest.TestCase):
                 "core.llm_client": fake_llm_client,
                 "core.opslog": fake_opslog,
                 "core.structured_output": fake_structured_output,
+                "core.tracing": fake_tracing,
             },
             clear=False,
         ):

@@ -16,6 +16,7 @@ from core.llmops import record_llm_call
 from core.llm_client import create_llm_client, get_model_name
 from core.opslog import record_activity, record_issue
 from core.structured_output import response_text
+from core.tracing import generation_cost_details, generation_usage_details, start_generation, summarize_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -172,33 +173,40 @@ def describe_image(image_data: bytes, mime_type: str) -> str:
         model_name = get_model_name("vision")
         started_at = datetime.now(timezone.utc).isoformat()
         started_clock = monotonic()
-        response = client.messages.create(
+        with start_generation(
+            name="vision-describe",
+            input={"image": summarize_bytes(image_data, label=mime_type)},
+            metadata={"channel": "vision", "mime_type": mime_type},
             model=model_name,
-            max_tokens=1024,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": mime_type,
-                                "data": b64,
+            model_parameters={"max_tokens": 1024},
+        ) as generation:
+            response = client.messages.create(
+                model=model_name,
+                max_tokens=1024,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": mime_type,
+                                    "data": b64,
+                                },
                             },
-                        },
-                        {
-                            "type": "text",
-                            "text": (
-                                "Describe this image. If it is a document, extract all visible text. "
-                                "Note any key details such as amounts, dates, names, addresses, "
-                                "or document type. Be thorough."
-                            ),
-                        },
-                    ],
-                }
-            ],
-        )
+                            {
+                                "type": "text",
+                                "text": (
+                                    "Describe this image. If it is a document, extract all visible text. "
+                                    "Note any key details such as amounts, dates, names, addresses, "
+                                    "or document type. Be thorough."
+                                ),
+                            },
+                        ],
+                    }
+                ],
+            )
         record_llm_call(
             task="vision",
             model=model_name,
@@ -208,7 +216,14 @@ def describe_image(image_data: bytes, mime_type: str) -> str:
             response=response,
             metadata={"channel": "vision", "mime_type": mime_type},
         )
-        return response_text(response)[:4000]
+        text = response_text(response)[:4000]
+        generation.update(
+            output=text,
+            metadata={"channel": "vision", "mime_type": mime_type, "raw_output_chars": len(text)},
+            usage_details=generation_usage_details(response),
+            cost_details=generation_cost_details(model_name, response),
+        )
+        return text
     except Exception as e:
         model_name = locals().get("model_name") or get_model_name("vision")
         record_llm_call(

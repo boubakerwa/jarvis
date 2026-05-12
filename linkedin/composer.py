@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 
 from config import settings
 from core.opslog import record_activity, record_issue
+from core.tracing import generation_cost_details, generation_usage_details, start_generation, start_trace, summarize_text
 
 logger = logging.getLogger(__name__)
 
@@ -252,73 +253,96 @@ def _call_llm(prompt: str, system: str, task_name: str) -> dict:
     started = time.monotonic()
     started_at = datetime.now(timezone.utc).isoformat()
 
-    try:
-        response = call_with_free_model_retry(
-            lambda: client.messages.create(
-                model=model,
-                max_tokens=1024,
-                system=system,
-                messages=[{"role": "user", "content": prompt}],
-            ),
-            model,
-        )
-    except Exception as exc:
-        record_llm_call(
-            task=task_name,
-            model=model,
-            status="api_error",
-            started_at=started_at,
-            latency_ms=(time.monotonic() - started) * 1000,
-            error=str(exc),
-        )
-        raise RuntimeError(f"LLM call failed for {task_name}: {exc}") from exc
-
-    stop_reason = getattr(response, "stop_reason", None)
-    text = "".join(
-        getattr(b, "text", "")
-        for b in getattr(response, "content", [])
-        if getattr(b, "type", None) == "text"
-    )
-    # Strip markdown fences
-    text = re.sub(r"```(?:json)?\s*", "", text)
-    text = re.sub(r"```", "", text).strip()
-
-    if not text:
-        # Log the raw response so we can see what actually came back
-        raw_content = getattr(response, "content", [])
-        logger.warning(
-            "LLM returned empty text for %s (stop_reason=%r, content_blocks=%d, raw=%r)",
-            task_name, stop_reason, len(raw_content), raw_content,
-        )
-        record_llm_call(
-            task=task_name,
-            model=model,
-            status="empty_response",
-            started_at=started_at,
-            latency_ms=(time.monotonic() - started) * 1000,
-            error=f"Empty text response (stop_reason={stop_reason})",
-        )
-        raise RuntimeError(
-            f"LLM returned empty response for {task_name} (stop_reason={stop_reason}). "
-            "The model may have refused or been truncated."
-        )
-
-    record_llm_call(
-        task=task_name,
+    with start_generation(
+        name=task_name,
+        input={"prompt": summarize_text(prompt, label="linkedin-prompt"), "system_chars": len(system)},
+        metadata={"task": task_name},
         model=model,
-        status="ok",
-        started_at=started_at,
-        latency_ms=(time.monotonic() - started) * 1000,
-    )
+        model_parameters={"max_tokens": 1024},
+    ) as generation:
+        try:
+            response = call_with_free_model_retry(
+                lambda: client.messages.create(
+                    model=model,
+                    max_tokens=1024,
+                    system=system,
+                    messages=[{"role": "user", "content": prompt}],
+                ),
+                model,
+            )
+        except Exception as exc:
+            record_llm_call(
+                task=task_name,
+                model=model,
+                status="api_error",
+                started_at=started_at,
+                latency_ms=(time.monotonic() - started) * 1000,
+                error=str(exc),
+            )
+            generation.update(metadata={"task": task_name, "status": "api_error"}, status_message=str(exc))
+            raise RuntimeError(f"LLM call failed for {task_name}: {exc}") from exc
 
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError as exc:
-        logger.warning(
-            "LLM returned invalid JSON for %s (stop_reason=%r): %r",
-            task_name, stop_reason, text[:500],
+        stop_reason = getattr(response, "stop_reason", None)
+        text = "".join(
+            getattr(b, "text", "")
+            for b in getattr(response, "content", [])
+            if getattr(b, "type", None) == "text"
         )
-        raise RuntimeError(f"LLM returned invalid JSON for {task_name}: {exc}") from exc
+        # Strip markdown fences
+        text = re.sub(r"```(?:json)?\s*", "", text)
+        text = re.sub(r"```", "", text).strip()
+
+        if not text:
+            # Log the raw response so we can see what actually came back
+            raw_content = getattr(response, "content", [])
+            logger.warning(
+                "LLM returned empty text for %s (stop_reason=%r, content_blocks=%d, raw=%r)",
+                task_name, stop_reason, len(raw_content), raw_content,
+            )
+            record_llm_call(
+                task=task_name,
+                model=model,
+                status="empty_response",
+                started_at=started_at,
+                latency_ms=(time.monotonic() - started) * 1000,
+                response=response,
+                error=f"Empty text response (stop_reason={stop_reason})",
+            )
+            generation.update(
+                metadata={"task": task_name, "status": "empty_response"},
+                usage_details=generation_usage_details(response),
+                cost_details=generation_cost_details(model, response),
+                status_message=f"Empty text response (stop_reason={stop_reason})",
+            )
+            raise RuntimeError(
+                f"LLM returned empty response for {task_name} (stop_reason={stop_reason}). "
+                "The model may have refused or been truncated."
+            )
+
+        record_llm_call(
+            task=task_name,
+            model=model,
+            status="ok",
+            started_at=started_at,
+            latency_ms=(time.monotonic() - started) * 1000,
+            response=response,
+            metadata={"stop_reason": stop_reason or "", "raw_output_chars": len(text)},
+        )
+        generation.update(
+            output=text,
+            metadata={"task": task_name, "stop_reason": stop_reason or "", "raw_output_chars": len(text)},
+            usage_details=generation_usage_details(response),
+            cost_details=generation_cost_details(model, response),
+        )
+
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as exc:
+            logger.warning(
+                "LLM returned invalid JSON for %s (stop_reason=%r): %r",
+                task_name, stop_reason, text[:500],
+            )
+            raise RuntimeError(f"LLM returned invalid JSON for {task_name}: {exc}") from exc
 
 
 def _parse_draft_response(raw: dict, source: dict, mode: str) -> dict:
@@ -463,14 +487,26 @@ def generate_draft(row: dict, parent_draft: dict | None = None) -> dict:
 
     is_rewrite = bool(rewrite_of and (rewrite_instructions or preset_id))
 
-    if is_rewrite and parent_draft:
-        prompt = _build_rewrite_prompt(source, parent_draft, voice, rewrite_instructions)
-        raw = _call_llm(prompt, _REWRITE_SYSTEM_PROMPT, "linkedin_rewrite")
-        draft = _parse_draft_response(raw, source, "model-rewrite")
-    else:
-        prompt = _build_model_prompt(source, voice)
-        raw = _call_llm(prompt, _DRAFT_SYSTEM_PROMPT, "linkedin_draft")
-        draft = _parse_draft_response(raw, source, "model")
+    with start_trace(
+        name="linkedin-draft",
+        session_id="linkedin",
+        input={"source": summarize_text(source_text, label="linkedin-source")},
+        metadata={
+            "task": "linkedin_rewrite" if is_rewrite else "linkedin_draft",
+            "draft_id": row.get("id", "")[:8],
+            "voice": voice,
+            "rewrite": is_rewrite,
+        },
+        tags=["linkedin"],
+    ):
+        if is_rewrite and parent_draft:
+            prompt = _build_rewrite_prompt(source, parent_draft, voice, rewrite_instructions)
+            raw = _call_llm(prompt, _REWRITE_SYSTEM_PROMPT, "linkedin_rewrite")
+            draft = _parse_draft_response(raw, source, "model-rewrite")
+        else:
+            prompt = _build_model_prompt(source, voice)
+            raw = _call_llm(prompt, _DRAFT_SYSTEM_PROMPT, "linkedin_draft")
+            draft = _parse_draft_response(raw, source, "model")
 
     record_activity(
         event="linkedin_draft_generated",

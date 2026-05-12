@@ -56,6 +56,8 @@ CREATE TABLE IF NOT EXISTS chat_reset_sessions (
     status TEXT NOT NULL DEFAULT 'active',
     started_at TEXT NOT NULL,
     next_run_at TEXT NOT NULL,
+    exchange_count INTEGER NOT NULL DEFAULT 0,
+    next_trigger_exchange INTEGER NOT NULL DEFAULT 3,
     sent_count INTEGER NOT NULL DEFAULT 0,
     last_sent_at TEXT,
     last_error TEXT,
@@ -140,13 +142,13 @@ _FOLLOW_UP_STAGE_MESSAGES: dict[str, tuple[str, ...]] = {
     ),
 }
 
-_CHAT_RESET_INITIAL_OFFSETS_MINUTES = (3, 10, 15)
-_CHAT_RESET_REPEAT_INTERVAL_MINUTES = 5
+_CHAT_RESET_INITIAL_EXCHANGE_TARGETS = (3, 10, 15)
+_CHAT_RESET_REPEAT_INTERVAL_EXCHANGES = 5
 _CHAT_RESET_MESSAGES: tuple[str, ...] = (
-    "This chat has been open for 3 minutes. If we are switching topics, reset it before context turns into soup.",
-    "10-minute checkpoint. If this is drifting into a new subject, reset the chat and spare future-you the confusion.",
-    "15 minutes in. The thread is now old enough to start lying by omission. Reset if we are pivoting.",
-    "Still going. If we are mixing topics, reset the chat. If not, dismiss me and live with your choices.",
+    "3 exchanges in. If this thread is already mutating into a different topic, reset the chat before context turns into soup.",
+    "10 exchanges in. If this has drifted into a new subject, reset the chat and spare future-you the confusion.",
+    "15 exchanges in. The thread is now old enough to start lying by omission. Reset if we are pivoting.",
+    "Another 5 exchanges went by. If we are mixing topics, reset the chat. If not, dismiss me and live with your choices.",
 )
 
 
@@ -525,6 +527,7 @@ class ChatResetSessionManager:
         self._db = sqlite3.connect(path, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         self._db.executescript(_CREATE_CHAT_RESET_SESSIONS_TABLE)
+        self._ensure_columns()
         self._db.commit()
         self._lock = threading.Lock()
 
@@ -550,7 +553,9 @@ class ChatResetSessionManager:
                 "id": str(uuid.uuid4()),
                 "status": "active",
                 "started_at": now_iso,
-                "next_run_at": (current_utc + _chat_reset_offset_for_delivery(1)).isoformat(),
+                "next_run_at": now_iso,
+                "exchange_count": 0,
+                "next_trigger_exchange": _chat_reset_exchange_target_for_delivery(1),
                 "sent_count": 0,
                 "last_sent_at": None,
                 "last_error": None,
@@ -562,15 +567,17 @@ class ChatResetSessionManager:
             self._db.execute(
                 """
                 INSERT INTO chat_reset_sessions (
-                    id, status, started_at, next_run_at, sent_count, last_sent_at,
+                    id, status, started_at, next_run_at, exchange_count, next_trigger_exchange, sent_count, last_sent_at,
                     last_error, created_at, updated_at, dismissed_at, reset_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session["id"],
                     session["status"],
                     session["started_at"],
                     session["next_run_at"],
+                    session["exchange_count"],
+                    session["next_trigger_exchange"],
                     session["sent_count"],
                     session["last_sent_at"],
                     session["last_error"],
@@ -589,39 +596,50 @@ class ChatResetSessionManager:
         )
         return session
 
-    def get_due_sessions(self, *, now: datetime | None = None, limit: int = 20) -> list[dict]:
-        now_iso = _utc_now(now).isoformat()
+    def record_exchange(self, session_id: str | None = None, *, now: datetime | None = None) -> dict | None:
+        current_utc = _utc_now(now)
+        now_iso = current_utc.isoformat()
         with self._lock:
-            rows = self._db.execute(
+            session = self._resolve_session_locked(session_id)
+            if session is None or session.get("status") != "active":
+                return None
+            exchange_count = int(session.get("exchange_count", 0)) + 1
+            self._db.execute(
                 """
-                SELECT * FROM chat_reset_sessions
-                WHERE status='active' AND next_run_at <= ?
-                ORDER BY next_run_at, created_at
-                LIMIT ?
+                UPDATE chat_reset_sessions
+                SET exchange_count=?, updated_at=?
+                WHERE id=? AND status='active'
                 """,
-                (now_iso, limit),
-            ).fetchall()
-        return [dict(row) for row in rows]
+                (exchange_count, now_iso, session["id"]),
+            )
+            self._db.commit()
+        return self.get_session(session["id"])
 
     def mark_sent(self, session: dict, *, now: datetime | None = None) -> dict:
         current_utc = _utc_now(now)
         now_iso = current_utc.isoformat()
         sent_count = int(session.get("sent_count", 0)) + 1
-        started_at = _from_db_datetime(session["started_at"])
-        next_delivery_number = sent_count + 1
-        next_run_at = (started_at + _chat_reset_offset_for_delivery(next_delivery_number)).isoformat()
+        next_trigger_exchange = _chat_reset_exchange_target_for_delivery(sent_count + 1)
 
         with self._lock:
             self._db.execute(
                 """
                 UPDATE chat_reset_sessions
-                SET sent_count=?, last_sent_at=?, next_run_at=?, updated_at=?, last_error=NULL
+                SET sent_count=?, last_sent_at=?, next_trigger_exchange=?, updated_at=?, last_error=NULL
                 WHERE id=? AND status='active'
                 """,
-                (sent_count, now_iso, next_run_at, now_iso, session["id"]),
+                (sent_count, now_iso, next_trigger_exchange, now_iso, session["id"]),
             )
             self._db.commit()
         return self.get_session(session["id"]) or session
+
+    def reminder_due(self, session: dict | None) -> bool:
+        if session is None or session.get("status") != "active":
+            return False
+        return int(session.get("exchange_count", 0)) >= int(session.get("next_trigger_exchange", 0))
+
+    def build_delivery_text(self, session: dict) -> str:
+        return _build_chat_reset_delivery_text(session)
 
     def dismiss_session(self, session_id: str | None = None, *, now: datetime | None = None) -> dict | None:
         return self._transition_session(session_id, "dismissed", now=now)
@@ -683,12 +701,23 @@ class ChatResetSessionManager:
         row = self._db.execute(
             """
             SELECT * FROM chat_reset_sessions
-            WHERE status IN ('active', 'dismissed')
+            WHERE status='active'
             ORDER BY created_at DESC
             LIMIT 1
             """
         ).fetchone()
         return dict(row) if row else None
+
+    def _ensure_columns(self) -> None:
+        columns = {
+            row["name"] for row in self._db.execute("PRAGMA table_info(chat_reset_sessions)").fetchall()
+        }
+        if "exchange_count" not in columns:
+            self._db.execute("ALTER TABLE chat_reset_sessions ADD COLUMN exchange_count INTEGER NOT NULL DEFAULT 0")
+        if "next_trigger_exchange" not in columns:
+            self._db.execute(
+                "ALTER TABLE chat_reset_sessions ADD COLUMN next_trigger_exchange INTEGER NOT NULL DEFAULT 3"
+            )
 
 
 class ReminderDeliveryRunner:
@@ -778,80 +807,6 @@ class ReminderDeliveryRunner:
         return delivered
 
 
-class ChatResetDeliveryRunner:
-    def __init__(
-        self,
-        *,
-        session_manager: ChatResetSessionManager,
-        notifier: "TelegramProactiveNotifier",
-        poll_interval_seconds: int = 30,
-    ) -> None:
-        self._sessions = session_manager
-        self._notifier = notifier
-        self._poll_interval_seconds = max(1, poll_interval_seconds)
-
-    def run_forever(self) -> None:
-        logger.info("Chat-reset delivery loop started (interval: %ss)", self._poll_interval_seconds)
-        while True:
-            self.run_once()
-            time.sleep(self._poll_interval_seconds)
-
-    def run_once(self, *, now: datetime | None = None) -> int:
-        sessions = self._sessions.get_due_sessions(now=now)
-        delivered = 0
-
-        for session in sessions:
-            op_id = new_op_id("chat-reset")
-            started = monotonic()
-            with operation_context(op_id):
-                try:
-                    sent = self._notifier.send_message(
-                        _build_chat_reset_delivery_text(session),
-                        reply_markup=_build_chat_reset_reply_markup(session["id"]),
-                    )
-                    duration_ms = (monotonic() - started) * 1000
-                    if sent:
-                        updated = self._sessions.mark_sent(session, now=now)
-                        delivered += 1
-                        record_activity(
-                            event="chat_reset_reminder_sent",
-                            component="telegram",
-                            summary="Sent scheduled chat-reset reminder",
-                            duration_ms=duration_ms,
-                            metadata={
-                                "session_id": session["id"],
-                                "sent_count": updated.get("sent_count", 0),
-                                "next_run_at": updated.get("next_run_at", ""),
-                            },
-                        )
-                    else:
-                        error = "Notifier returned False"
-                        self._sessions.mark_delivery_failed(session["id"], error, now=now)
-                        record_issue(
-                            level="WARNING",
-                            event="chat_reset_reminder_send_failed",
-                            component="telegram",
-                            status="warning",
-                            summary="Chat-reset reminder could not be delivered",
-                            duration_ms=duration_ms,
-                            metadata={"session_id": session["id"], "error": error},
-                        )
-                except Exception as exc:
-                    self._sessions.mark_delivery_failed(session["id"], str(exc), now=now)
-                    logger.exception("Chat-reset reminder delivery failed: %s", exc)
-                    record_issue(
-                        level="ERROR",
-                        event="chat_reset_reminder_delivery_error",
-                        component="telegram",
-                        status="error",
-                        summary="Chat-reset reminder raised an unexpected error",
-                        duration_ms=(monotonic() - started) * 1000,
-                        metadata={"session_id": session["id"], "error": str(exc)},
-                    )
-
-        return delivered
-
-
 def _follow_up_interval(sent_count: int) -> timedelta:
     index = max(sent_count - 1, 0)
     if index >= len(_FOLLOW_UP_INTERVALS):
@@ -887,13 +842,12 @@ def _build_reminder_reply_markup(reminder_id: str):
     )
 
 
-def _chat_reset_offset_for_delivery(delivery_number: int) -> timedelta:
+def _chat_reset_exchange_target_for_delivery(delivery_number: int) -> int:
     index = max(delivery_number, 1)
-    if index <= len(_CHAT_RESET_INITIAL_OFFSETS_MINUTES):
-        return timedelta(minutes=_CHAT_RESET_INITIAL_OFFSETS_MINUTES[index - 1])
-    return timedelta(
-        minutes=_CHAT_RESET_INITIAL_OFFSETS_MINUTES[-1]
-        + _CHAT_RESET_REPEAT_INTERVAL_MINUTES * (index - len(_CHAT_RESET_INITIAL_OFFSETS_MINUTES))
+    if index <= len(_CHAT_RESET_INITIAL_EXCHANGE_TARGETS):
+        return _CHAT_RESET_INITIAL_EXCHANGE_TARGETS[index - 1]
+    return _CHAT_RESET_INITIAL_EXCHANGE_TARGETS[-1] + (
+        _CHAT_RESET_REPEAT_INTERVAL_EXCHANGES * (index - len(_CHAT_RESET_INITIAL_EXCHANGE_TARGETS))
     )
 
 
@@ -903,19 +857,3 @@ def _build_chat_reset_delivery_text(session: dict) -> str:
         sent_count = 0
     index = min(sent_count, len(_CHAT_RESET_MESSAGES) - 1)
     return _CHAT_RESET_MESSAGES[index]
-
-
-def _build_chat_reset_reply_markup(session_id: str):
-    try:
-        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-    except Exception:
-        return None
-
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("Reset Chat", callback_data=f"chatreset:reset:{session_id}"),
-                InlineKeyboardButton("Dismiss", callback_data=f"chatreset:dismiss:{session_id}"),
-            ]
-        ]
-    )
