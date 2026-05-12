@@ -540,27 +540,27 @@ def format_queued_for_telegram(row: dict) -> str:
 
 
 def format_ready_for_telegram(row: dict, draft: dict) -> str:
-    """Full post notification sent when processing completes."""
+    """Completion notification sent when processing completes."""
     draft_id = row.get("id", "")[:8]
     voice = row.get("voice", DEFAULT_VOICE)
     pillar = row.get("pillar_label", "")
     generation_mode = draft.get("generation", {}).get("mode", "")
     source_author = row.get("source_author", "")
-    drive_filename = row.get("drive_filename", "")
+    obsidian_filename = row.get("obsidian_filename", "")
+    obsidian_path = row.get("obsidian_path", "")
     headline = draft.get("headline", "Untitled")
-    full_post = draft.get("fullPost", "")
 
     lines = [
-        f"✅ *{headline}*",
+        f"✅ *LinkedIn draft ready* · `{draft_id}`",
+        f"{headline}",
         f"_Voice: {voice} · Pillar: {pillar} · Mode: {generation_mode}_",
     ]
     if source_author:
         lines.append(f"_Source: {source_author}_")
-    lines.append("")
-    lines.append(full_post)
-    lines.append("")
-    if drive_filename:
-        lines.append(f"_Saved as `{drive_filename}` in Drive_")
+    if obsidian_filename:
+        lines.append(f"_Saved as `{obsidian_filename}` in Obsidian_")
+    elif obsidian_path:
+        lines.append(f"_Saved at `{obsidian_path}`_")
     lines.append(f"_Draft ID: `{draft_id}`_")
     return "\n".join(lines)
 
