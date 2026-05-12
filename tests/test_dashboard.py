@@ -625,9 +625,12 @@ class DashboardTests(unittest.TestCase):
         self.assertIn('source.split("\\n")', html)
         self.assertIn('trimmed.match(/^(#{1,6})\\s+(.*)$/)', html)
         self.assertIn('data-linkedin-save', html)
-        self.assertIn("Ready Backlog", html)
-        self.assertIn("Schedule next slot", html)
+        self.assertIn("Publishing Calendar", html)
+        self.assertIn("Tuesday and Thursday at 09:00 Europe/Berlin", html)
+        self.assertIn("Open slot", html)
+        self.assertIn("Schedule", html)
         self.assertIn("Mark published", html)
+        self.assertNotIn("Gmail state", html)
         self.assertIn('void openLinkedInDraft(linkedinState.selectedDraftId, true);', html)
 
     def test_linkedin_editor_payload_and_save_round_trip_note(self):

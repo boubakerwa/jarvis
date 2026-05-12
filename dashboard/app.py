@@ -2320,6 +2320,8 @@ def _render_summary_panel(snapshot: DashboardSnapshot) -> str:
 
 
 def _render_linkedin_content(snapshot: DashboardSnapshot) -> str:
+    from linkedin.editorial import next_publish_slots
+
     drafts = snapshot.linkedin_drafts
     overdue = [item for item in drafts if item.is_overdue]
     scheduled = [item for item in drafts if item.publish_status == "scheduled" and not item.is_overdue]
@@ -2327,34 +2329,59 @@ def _render_linkedin_content(snapshot: DashboardSnapshot) -> str:
         item for item in drafts
         if item.publish_status in {"", "unscheduled"} and item.status in {"ready", "needs_attention"}
     ]
-    published = [item for item in drafts if item.publish_status == "published"]
+    scheduled_by_slot = {item.scheduled_for: item for item in scheduled if item.scheduled_for}
+    calendar_slots = next_publish_slots(count=8, occupied=set())
 
-    def _mini_item(item: LinkedInDraftItem) -> str:
-        score = f"{item.score_total}/100" if item.score_total else "unscored"
-        when = item.scheduled_for_local or "unscheduled"
+    def _slot_card(slot: dict[str, str]) -> str:
+        item = scheduled_by_slot.get(slot["scheduled_for"])
+        date_label = html.escape(slot.get("date_label", ""))
+        time_label = html.escape(slot.get("time_label", "09:00"))
+        if item:
+            score = f"{item.score_total}/100" if item.score_total else "unscored"
+            body = f"""
+              <button type="button" class="li-slot-post" data-linkedin-open="{html.escape(item.lookup_id)}">
+                <strong>{html.escape(item.headline)}</strong>
+                <span>{html.escape(score)} · {html.escape(item.source_label)}</span>
+              </button>
+            """
+            state_class = " is-filled"
+        else:
+            body = '<div class="li-slot-empty">Open slot</div>'
+            state_class = ""
         return f"""
-          <button type="button" class="li-mini-item{' is-overdue' if item.is_overdue else ''}" data-linkedin-open="{html.escape(item.lookup_id)}">
-            <span>{html.escape(when)}</span>
-            <strong>{html.escape(item.headline)}</strong>
-            <em>{html.escape(score)}</em>
-          </button>
-        """
-
-    def _mini_column(title: str, items: list[LinkedInDraftItem], empty: str) -> str:
-        body = "".join(_mini_item(item) for item in items[:8]) if items else f'<p class="li-mini-empty">{html.escape(empty)}</p>'
-        return f"""
-          <div class="li-calendar-column">
-            <div class="li-calendar-title">{html.escape(title)}</div>
+          <div class="li-calendar-slot{state_class}">
+            <div class="li-slot-date">{date_label}</div>
+            <div class="li-slot-time">{time_label}</div>
             {body}
           </div>
         """
 
+    overdue_html = ""
+    if overdue:
+        overdue_items = "".join(
+            f"""
+              <button type="button" class="li-overdue-item" data-linkedin-open="{html.escape(item.lookup_id)}">
+                <strong>{html.escape(item.headline)}</strong>
+                <span>{html.escape(item.scheduled_for_local or "missed slot")}</span>
+              </button>
+            """
+            for item in overdue[:3]
+        )
+        overdue_html = f'<div class="li-overdue-strip"><span>{len(overdue)} missed</span>{overdue_items}</div>'
+
     calendar_html = f"""
-      <div class="li-calendar">
-        {_mini_column("Overdue", overdue, "No missed posts.")}
-        {_mini_column("Scheduled", scheduled, "No posts scheduled yet.")}
-        {_mini_column("Ready Backlog", backlog, "No ready unscheduled drafts.")}
-        {_mini_column("Published", published, "No published posts marked yet.")}
+      <div class="li-calendar-panel">
+        <div class="li-calendar-header">
+          <div>
+            <h3>Publishing Calendar</h3>
+            <p>Tuesday and Thursday at 09:00 Europe/Berlin</p>
+          </div>
+          <span>{len(scheduled)} scheduled · {len(backlog)} ready</span>
+        </div>
+        {overdue_html}
+        <div class="li-calendar-grid">
+          {"".join(_slot_card(slot) for slot in calendar_slots)}
+        </div>
       </div>
     """
 
@@ -2522,72 +2549,153 @@ def _render_linkedin_content(snapshot: DashboardSnapshot) -> str:
         gap: 20px;
         align-items: start;
       }}
-      .li-calendar {{
-        display: grid;
-        grid-template-columns: repeat(4, minmax(0, 1fr));
-        gap: 12px;
-        margin-bottom: 20px;
-      }}
-      @media (max-width: 1180px) {{
-        .li-calendar {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
-      }}
-      @media (max-width: 720px) {{
-        .li-calendar {{ grid-template-columns: 1fr; }}
-      }}
-      .li-calendar-column {{
+      .li-calendar-panel {{
         border: 1px solid rgba(255,255,255,0.08);
         background: #14171b;
-        min-height: 160px;
+        border-radius: 4px;
+        padding: 16px;
+        margin-bottom: 20px;
+      }}
+      .li-calendar-header {{
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 16px;
+        margin-bottom: 16px;
+      }}
+      .li-calendar-header h3 {{
+        margin: 0 0 4px 0;
+        font-size: 18px;
+        font-weight: 590;
+        color: #f0f1f3;
+      }}
+      .li-calendar-header p,
+      .li-calendar-header span {{
+        margin: 0;
+        font-family: ui-monospace, SFMono-Regular, Roboto Mono, Menlo, Monaco, Courier New, monospace;
+        font-size: 11px;
+        color: #8f96a3;
+      }}
+      .li-calendar-header span {{
+        white-space: nowrap;
+        text-transform: uppercase;
+      }}
+      .li-calendar-grid {{
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+      }}
+      @media (max-width: 1180px) {{
+        .li-calendar-grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+      }}
+      @media (max-width: 720px) {{
+        .li-calendar-header {{ display: grid; }}
+        .li-calendar-grid {{ grid-template-columns: 1fr; }}
+      }}
+      .li-calendar-slot {{
+        display: grid;
+        grid-template-rows: auto auto 1fr;
+        min-height: 118px;
+        border: 1px solid rgba(255,255,255,0.08);
+        background: #101318;
+        border-radius: 4px;
         padding: 12px;
       }}
-      .li-calendar-title {{
-        font-family: ui-monospace, SFMono-Regular, Roboto Mono, Menlo, Monaco, Courier New, monospace;
-        font-size: 10px;
-        letter-spacing: 1.1px;
-        text-transform: uppercase;
-        color: #7a808c;
-        margin-bottom: 10px;
+      .li-calendar-slot.is-filled {{
+        border-color: rgba(0,200,255,0.28);
+        background: rgba(0,200,255,0.05);
       }}
-      .li-mini-item {{
+      .li-slot-date,
+      .li-slot-time {{
+        font-family: ui-monospace, SFMono-Regular, Roboto Mono, Menlo, Monaco, Courier New, monospace;
+      }}
+      .li-slot-date {{
+        color: #f0f1f3;
+        font-size: 12px;
+        font-weight: 600;
+      }}
+      .li-slot-time {{
+        margin-top: 3px;
+        color: #00c8ff;
+        font-size: 11px;
+      }}
+      .li-slot-empty {{
+        align-self: end;
+        color: #747b86;
+        font-size: 12px;
+      }}
+      .li-slot-post,
+      .li-overdue-item {{
         appearance: none;
         display: grid;
         gap: 4px;
         width: 100%;
         text-align: left;
-        border: 1px solid rgba(255,255,255,0.08);
-        background: #1c1f24;
+        border: 0;
+        background: transparent;
         color: inherit;
-        padding: 10px;
-        margin-bottom: 8px;
+        padding: 0;
         cursor: pointer;
       }}
-      .li-mini-item:hover {{ border-color: rgba(0,200,255,0.35); }}
-      .li-mini-item.is-overdue {{ border-color: rgba(245,158,11,0.35); }}
-      .li-mini-item span,
-      .li-mini-item em {{
-        font-family: ui-monospace, SFMono-Regular, Roboto Mono, Menlo, Monaco, Courier New, monospace;
-        font-size: 10px;
-        color: #7a808c;
-        font-style: normal;
+      .li-slot-post {{
+        align-self: end;
+        margin-top: 14px;
       }}
-      .li-mini-item strong {{
+      .li-slot-post:hover strong,
+      .li-overdue-item:hover strong {{ color: #00c8ff; }}
+      .li-slot-post strong,
+      .li-overdue-item strong {{
         font-size: 12px;
         line-height: 1.35;
         color: #f0f1f3;
-        font-weight: 510;
+        font-weight: 590;
       }}
-      .li-mini-empty {{
-        margin: 0;
+      .li-slot-post span,
+      .li-overdue-item span {{
+        font-family: ui-monospace, SFMono-Regular, Roboto Mono, Menlo, Monaco, Courier New, monospace;
+        font-size: 10px;
         color: #7a808c;
+      }}
+      .li-overdue-strip {{
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+        margin-bottom: 14px;
+        padding: 10px;
+        border: 1px solid rgba(245,158,11,0.25);
+        background: rgba(245,158,11,0.06);
+      }}
+      .li-overdue-strip > span {{
+        font-family: ui-monospace, SFMono-Regular, Roboto Mono, Menlo, Monaco, Courier New, monospace;
         font-size: 12px;
-        line-height: 1.5;
+        color: #f59e0b;
+        text-transform: uppercase;
+      }}
+      .li-overdue-item {{
+        width: auto;
+        min-width: 180px;
+        max-width: 320px;
       }}
       .li-list {{
         display: grid;
         gap: 14px;
       }}
+      .li-list-shell {{
+        max-height: 760px;
+        overflow-y: auto;
+        padding-right: 6px;
+        scrollbar-color: rgba(0,200,255,0.35) rgba(255,255,255,0.06);
+      }}
+      .li-list-shell::-webkit-scrollbar {{ width: 8px; }}
+      .li-list-shell::-webkit-scrollbar-track {{ background: rgba(255,255,255,0.04); }}
+      .li-list-shell::-webkit-scrollbar-thumb {{
+        background: rgba(0,200,255,0.3);
+        border-radius: 4px;
+      }}
       @media (max-width: 1080px) {{
         .li-workspace {{ grid-template-columns: 1fr; }}
+        .li-list-shell {{ max-height: 520px; }}
       }}
       .li-card {{
         appearance: none;
@@ -2780,28 +2888,37 @@ def _render_linkedin_content(snapshot: DashboardSnapshot) -> str:
       }}
       .li-editor-controls {{
         display: flex;
-        flex-wrap: wrap;
         gap: 8px;
         justify-content: flex-end;
+        align-items: center;
+      }}
+      .li-mode-switch {{
+        display: inline-flex;
+        border: 1px solid rgba(255,255,255,0.12);
+        background: #0d1014;
+        border-radius: 4px;
+        overflow: hidden;
       }}
       .li-mode-btn,
       .li-save-btn {{
         appearance: none;
-        border: 1px solid rgba(255,255,255,0.14);
+        border: 0;
         background: transparent;
         color: #b8bdc6;
-        padding: 8px 12px;
+        padding: 8px 11px;
         font: inherit;
+        font-size: 12px;
         cursor: pointer;
       }}
       .li-mode-btn.is-active {{
-        border-color: rgba(0,200,255,0.45);
         color: #00c8ff;
         background: rgba(0,200,255,0.08);
       }}
       .li-save-btn {{
-        border-color: rgba(0,200,255,0.35);
+        border: 1px solid rgba(0,200,255,0.35);
+        border-radius: 4px;
         color: #00c8ff;
+        background: rgba(0,200,255,0.06);
       }}
       .li-save-btn[disabled],
       .li-mode-btn[disabled] {{
@@ -2811,14 +2928,25 @@ def _render_linkedin_content(snapshot: DashboardSnapshot) -> str:
       .li-editor-tools {{
         display: flex;
         flex-wrap: wrap;
+        gap: 10px;
+        align-items: center;
+        padding: 12px;
+        border: 1px solid rgba(255,255,255,0.08);
+        background: #101318;
+        border-radius: 4px;
+      }}
+      .li-action-group {{
+        display: flex;
+        flex-wrap: wrap;
         gap: 8px;
       }}
       .li-tool-btn {{
         appearance: none;
         border: 1px solid rgba(255,255,255,0.12);
-        background: #14171b;
+        background: #151920;
+        border-radius: 4px;
         color: #b8bdc6;
-        padding: 7px 10px;
+        padding: 8px 10px;
         font: inherit;
         font-size: 12px;
         cursor: pointer;
@@ -2826,6 +2954,14 @@ def _render_linkedin_content(snapshot: DashboardSnapshot) -> str:
       .li-tool-btn:hover {{
         border-color: rgba(0,200,255,0.35);
         color: #f0f1f3;
+      }}
+      .li-tool-btn--primary {{
+        border-color: rgba(0,200,255,0.35);
+        color: #d7f7ff;
+        background: rgba(0,200,255,0.08);
+      }}
+      .li-tool-btn--muted {{
+        color: #8f96a3;
       }}
       .li-editor-status {{
         font-size: 12px;
@@ -2959,21 +3095,27 @@ def _render_linkedin_content(snapshot: DashboardSnapshot) -> str:
                 <div class="li-editor-meta" data-linkedin-meta>Open a draft to inspect or edit its markdown.</div>
               </div>
               <div class="li-editor-controls">
-                <button type="button" class="li-mode-btn is-active" data-linkedin-mode="preview">Preview</button>
-                <button type="button" class="li-mode-btn" data-linkedin-mode="edit">Edit</button>
-                <button type="button" class="li-mode-btn" data-linkedin-retry>Re-trigger</button>
+                <div class="li-mode-switch" aria-label="Editor mode">
+                  <button type="button" class="li-mode-btn is-active" data-linkedin-mode="preview">Preview</button>
+                  <button type="button" class="li-mode-btn" data-linkedin-mode="edit">Edit</button>
+                </div>
                 <button type="button" class="li-save-btn" data-linkedin-save disabled>Save</button>
               </div>
             </div>
             <div class="li-editor-status" data-linkedin-status></div>
             <div class="li-editor-tools">
-              <button type="button" class="li-tool-btn" data-linkedin-copy>Copy post</button>
-              <button type="button" class="li-tool-btn" data-linkedin-schedule>Schedule next slot</button>
-              <button type="button" class="li-tool-btn" data-linkedin-clear-schedule>Clear schedule</button>
-              <button type="button" class="li-tool-btn" data-linkedin-source>Verify source</button>
-              <button type="button" class="li-tool-btn" data-linkedin-score>Score</button>
-              <button type="button" class="li-tool-btn" data-linkedin-publish>Mark published</button>
-              <button type="button" class="li-tool-btn" data-linkedin-archive>Archive</button>
+              <div class="li-action-group">
+                <button type="button" class="li-tool-btn li-tool-btn--primary" data-linkedin-copy>Copy post</button>
+                <button type="button" class="li-tool-btn li-tool-btn--primary" data-linkedin-schedule>Schedule</button>
+                <button type="button" class="li-tool-btn li-tool-btn--primary" data-linkedin-publish>Mark published</button>
+              </div>
+              <div class="li-action-group">
+                <button type="button" class="li-tool-btn" data-linkedin-source>Verify source</button>
+                <button type="button" class="li-tool-btn" data-linkedin-score>Score</button>
+                <button type="button" class="li-tool-btn" data-linkedin-retry>Re-trigger</button>
+                <button type="button" class="li-tool-btn li-tool-btn--muted" data-linkedin-clear-schedule>Clear schedule</button>
+                <button type="button" class="li-tool-btn li-tool-btn--muted" data-linkedin-archive>Archive</button>
+              </div>
             </div>
             <textarea class="li-editor-textarea" data-linkedin-editor hidden spellcheck="false"></textarea>
             <div class="li-editor-preview" data-linkedin-preview></div>
@@ -2999,7 +3141,7 @@ def _render_tab_content(snapshot: DashboardSnapshot, tab: str) -> str:
 
 def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
     active_tab = _normalize_tab(tab)
-    initial_summary = _render_summary_panel(snapshot)
+    initial_summary = "" if active_tab == "linkedin" else _render_summary_panel(snapshot)
     initial_tab_content = _render_tab_content(snapshot, active_tab)
     logo_svg = _load_dashboard_logo_svg()
     runtime_info = _dashboard_runtime_info()
@@ -3434,6 +3576,9 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
         activeTab = allowedTabs.has(tab) ? tab : "overview";
         for (const button of navButtons) {{
           button.classList.toggle("active", button.dataset.tab === activeTab);
+        }}
+        if (activeTab === "linkedin" && summaryPanel) {{
+          summaryPanel.innerHTML = "";
         }}
         scheduleCurrentTabRefresh();
         if (updateHistory) {{
@@ -4192,6 +4337,12 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
       }}
 
       async function refreshSummary() {{
+        if (activeTab === "linkedin") {{
+          if (summaryPanel) {{
+            summaryPanel.innerHTML = "";
+          }}
+          return null;
+        }}
         if (document.visibilityState !== "visible" || summaryRequest) {{
           return summaryRequest;
         }}
