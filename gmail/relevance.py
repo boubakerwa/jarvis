@@ -13,27 +13,11 @@ from core.structured_output import StructuredOutputError, generate_validated_jso
 logger = logging.getLogger(__name__)
 
 _RELEVANCE_PROMPT = """\
-You are an email triage assistant. Decide whether this email contains a document \
-worth filing in a personal document library.
+Decide whether this email should be filed in a personal document library.
+The email may be in English or German.
 
-The email may be in English or German. Evaluate it correctly regardless of language.
-
-FILE if the email contains or is:
-- Contracts, agreements, or legal documents (Vertrag, Vereinbarung)
-- Invoices, receipts, or payment confirmations (Rechnung, Quittung, Zahlungsbestätigung)
-- Insurance documents or policies (Versicherung, Police, Krankenversicherung)
-- Travel bookings, tickets, or itineraries
-- Official correspondence (government, tax, bank, employer) (Steuerbescheid, Kontoauszug, Bescheid)
-- Health records, prescriptions, or medical documents
-- Certificates, credentials, or licences (Bescheinigung, Zertifikat)
-- Dunning notices or formal reminders (Mahnung)
-
-SKIP if the email is:
-- A newsletter or marketing email
-- An OTP, verification code, or security alert
-- A social notification (likes, follows, comments)
-- An automated system notification or status update
-- A promotional or transactional email with no document value
+FILE: contracts, invoices, receipts, insurance, travel bookings, official correspondence, health documents, certificates, licences, dunning notices.
+SKIP: newsletters, marketing, OTP/security alerts, social notifications, routine system notifications, low-value transactional mail.
 
 Respond ONLY with a JSON object:
 {{
@@ -44,7 +28,7 @@ Respond ONLY with a JSON object:
 Email details:
 - From: {sender}
 - Subject: {subject}
-- Body preview (first 500 chars): {body_preview}
+- Body preview (first 300 chars): {body_preview}
 - Attachments: {attachment_names}
 """
 
@@ -76,7 +60,7 @@ def is_worth_filing(email) -> tuple[bool, str]:
     prompt = _RELEVANCE_PROMPT.format(
         sender=email.sender,
         subject=email.subject,
-        body_preview=email.body[:500],
+        body_preview=email.body[:300],
         attachment_names=attachment_names,
     )
 

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Gmail polling loop. Checks for new unread emails every GMAIL_POLL_INTERVAL seconds.
 Marks emails as read after processing. Persists last-processed message ID to avoid

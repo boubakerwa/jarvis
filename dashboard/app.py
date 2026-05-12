@@ -191,6 +191,15 @@ class LinkedInDraftItem:
     obsidian_path: str
     obsidian_filename: str
     attempts: int
+    scheduled_for: str = ""
+    scheduled_for_local: str = ""
+    publish_status: str = "unscheduled"
+    published_at: str = ""
+    linkedin_url: str = ""
+    score_total: int = 0
+    verified_source_url: str = ""
+    link_policy: str = "first_comment"
+    is_overdue: bool = False
 
 
 @dataclass
@@ -1031,6 +1040,11 @@ def _load_drive_snapshot() -> tuple[list[DriveFileItem], str, str]:
 def _load_linkedin_drafts_from_sqlite(limit: int = 20) -> tuple[list[LinkedInDraftItem], str]:
     """Load LinkedIn drafts from SQLite for the dashboard."""
     try:
+        try:
+            from linkedin.sqlite_store import count_by_status
+            count_by_status()  # creates/migrates linkedin_drafts before dashboard reads it directly
+        except Exception as migration_exc:
+            logger.debug("Dashboard LinkedIn schema warm-up skipped: %s", migration_exc)
         import sqlite3 as _sqlite3
         from config import settings as _settings
         conn = _sqlite3.connect(_settings.JARVIS_DB_PATH, check_same_thread=False)
@@ -1046,6 +1060,7 @@ def _load_linkedin_drafts_from_sqlite(limit: int = 20) -> tuple[list[LinkedInDra
 
     items: list[LinkedInDraftItem] = []
     notes_manager = _build_notes_manager()
+    now_utc = datetime.now(timezone.utc)
     for row in rows:
         r = dict(row)
         try:
@@ -1060,6 +1075,19 @@ def _load_linkedin_drafts_from_sqlite(limit: int = 20) -> tuple[list[LinkedInDra
         )
         effective_status = _effective_linkedin_status(r, note_loaded=note_loaded, content=note_text)
         headline, hook = _extract_linkedin_headline_and_excerpt(note_text, fallback_title)
+        scheduled_for = str(r.get("scheduled_for", "") or "")
+        publish_status = str(r.get("publish_status", "") or "unscheduled")
+        scheduled_dt = _parse_ts(scheduled_for) if scheduled_for else None
+        is_overdue = bool(
+            publish_status == "scheduled"
+            and scheduled_dt is not None
+            and scheduled_dt.astimezone(timezone.utc) <= now_utc
+        )
+        try:
+            from linkedin.editorial import local_display
+            scheduled_local = local_display(scheduled_for)
+        except Exception:
+            scheduled_local = scheduled_for[:19].replace("T", " ") if scheduled_for else ""
         items.append(
             LinkedInDraftItem(
                 draft_id=str(r.get("id", ""))[:8],
@@ -1082,6 +1110,15 @@ def _load_linkedin_drafts_from_sqlite(limit: int = 20) -> tuple[list[LinkedInDra
                 obsidian_path=str(r.get("obsidian_path", "")),
                 obsidian_filename=str(r.get("obsidian_filename", "")),
                 attempts=int(r.get("attempts", 0)),
+                scheduled_for=scheduled_for,
+                scheduled_for_local=scheduled_local,
+                publish_status=publish_status,
+                published_at=str(r.get("published_at", "") or ""),
+                linkedin_url=str(r.get("linkedin_url", "") or ""),
+                score_total=int(r.get("score_total", 0) or 0),
+                verified_source_url=str(r.get("verified_source_url", "") or ""),
+                link_policy=str(r.get("link_policy", "") or "first_comment"),
+                is_overdue=is_overdue,
             )
         )
     return items, f"loaded {len(items)} draft(s)"
@@ -1092,6 +1129,11 @@ def _load_linkedin_draft_row(draft_id_prefix: str) -> dict[str, Any] | None:
     if not prefix:
         return None
     try:
+        try:
+            from linkedin.sqlite_store import count_by_status
+            count_by_status()
+        except Exception as migration_exc:
+            logger.debug("Dashboard LinkedIn schema warm-up skipped: %s", migration_exc)
         conn = sqlite3.connect(settings.JARVIS_DB_PATH, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         row = conn.execute(
@@ -1115,6 +1157,16 @@ def _build_linkedin_scaffold(row: dict[str, Any]) -> str:
     if source_url:
         lines.extend(["", f"Source: {source_url}"])
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _safe_json_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    try:
+        parsed = json.loads(str(value or "{}"))
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
 
 
 def _is_linkedin_scaffold_content(row: dict[str, Any], content: str) -> bool:
@@ -1168,6 +1220,16 @@ def _linkedin_editor_payload(draft_id_prefix: str) -> tuple[dict[str, Any], int]
         content,
         _prettify_linkedin_title(str(row.get("obsidian_filename", "") or row.get("id", "")[:8])),
     )
+    scheduled_for = str(row.get("scheduled_for", "") or "")
+    try:
+        from linkedin.editorial import local_display
+        scheduled_for_local = local_display(scheduled_for)
+    except Exception:
+        scheduled_for_local = scheduled_for[:19].replace("T", " ") if scheduled_for else ""
+    publish_status = str(row.get("publish_status", "") or "unscheduled")
+    verified_source_url = str(row.get("verified_source_url", "") or "")
+    source_url = str(row.get("source_url", "") or "")
+    first_comment = verified_source_url or source_url
     return (
         {
             "draftId": str(row.get("id", "")),
@@ -1186,6 +1248,18 @@ def _linkedin_editor_payload(draft_id_prefix: str) -> tuple[dict[str, Any], int]
             "canRetry": effective_status != "pending_generation",
             "detail": detail,
             "content": content,
+            "scheduledFor": scheduled_for,
+            "scheduledForLocal": scheduled_for_local,
+            "publishStatus": publish_status,
+            "publishedAt": str(row.get("published_at", "") or ""),
+            "linkedinUrl": str(row.get("linkedin_url", "") or ""),
+            "scoreTotal": int(row.get("score_total", 0) or 0),
+            "score": _safe_json_dict(row.get("score_json", "{}")),
+            "verifiedSourceUrl": verified_source_url,
+            "sourceUrl": source_url,
+            "sourceDossier": _safe_json_dict(row.get("source_dossier_json", "{}")),
+            "linkPolicy": str(row.get("link_policy", "") or "first_comment"),
+            "firstComment": first_comment,
         },
         200,
     )
@@ -1273,6 +1347,180 @@ def _retry_linkedin_draft_processing(draft_id_prefix: str) -> tuple[dict[str, An
     else:
         payload["detail"] = "Post re-triggered and queued for processing."
     return payload, 200
+
+
+def _linkedin_calendar_payload() -> tuple[dict[str, Any], int]:
+    try:
+        from linkedin.editorial import next_publish_slots
+        from linkedin.sqlite_store import list_drafts
+    except Exception as exc:
+        return {"error": f"Failed to load LinkedIn calendar: {exc}"}, 500
+
+    drafts = list_drafts(limit=200)
+    occupied = {
+        str(row.get("scheduled_for") or "")
+        for row in drafts
+        if str(row.get("publish_status") or "") == "scheduled" and row.get("scheduled_for")
+    }
+    scheduled = []
+    overdue = []
+    now_utc = datetime.now(timezone.utc)
+    for row in drafts:
+        if str(row.get("publish_status") or "") != "scheduled":
+            continue
+        scheduled_for = str(row.get("scheduled_for") or "")
+        scheduled_dt = _parse_ts(scheduled_for) if scheduled_for else None
+        item = _linkedin_calendar_item(row)
+        scheduled.append(item)
+        if scheduled_dt and scheduled_dt.astimezone(timezone.utc) <= now_utc:
+            overdue.append(item)
+    return {
+        "scheduled": sorted(scheduled, key=lambda item: item.get("scheduledFor", "")),
+        "overdue": sorted(overdue, key=lambda item: item.get("scheduledFor", "")),
+        "nextSlots": next_publish_slots(count=8, occupied=occupied),
+    }, 200
+
+
+def _linkedin_calendar_item(row: dict[str, Any]) -> dict[str, Any]:
+    try:
+        from linkedin.editorial import local_display
+        scheduled_local = local_display(str(row.get("scheduled_for") or ""))
+    except Exception:
+        scheduled_local = str(row.get("scheduled_for") or "")
+    return {
+        "draftId": str(row.get("id", "")),
+        "shortId": str(row.get("id", ""))[:8],
+        "scheduledFor": str(row.get("scheduled_for") or ""),
+        "scheduledForLocal": scheduled_local,
+        "publishStatus": str(row.get("publish_status") or "unscheduled"),
+        "title": str(row.get("obsidian_filename") or row.get("source_text") or "")[:120],
+        "scoreTotal": int(row.get("score_total", 0) or 0),
+    }
+
+
+def _schedule_linkedin_draft(draft_id_prefix: str, payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    row = _load_linkedin_draft_row(draft_id_prefix)
+    if row is None:
+        return {"error": "LinkedIn draft not found."}, 404
+    try:
+        from linkedin.editorial import next_publish_slots, parse_datetime, to_utc_iso
+        from linkedin.sqlite_store import list_drafts, schedule_draft
+
+        scheduled_for = str(payload.get("scheduledFor") or payload.get("scheduled_for") or "").strip()
+        if not scheduled_for:
+            drafts = list_drafts(limit=200)
+            occupied = {
+                str(d.get("scheduled_for") or "")
+                for d in drafts
+                if str(d.get("publish_status") or "") == "scheduled" and d.get("scheduled_for")
+            }
+            slots = next_publish_slots(count=1, occupied=occupied)
+            if not slots:
+                return {"error": "No publishing slot available."}, 409
+            scheduled_for = slots[0]["scheduled_for"]
+        else:
+            scheduled_for = to_utc_iso(parse_datetime(scheduled_for))
+        updated = schedule_draft(str(row.get("id", "")), scheduled_for)
+        if updated is None:
+            return {"error": "LinkedIn draft not found."}, 404
+    except Exception as exc:
+        return {"error": f"Failed to schedule draft: {exc}"}, 500
+
+    response, status_code = _linkedin_editor_payload(str(row.get("id", "")))
+    if status_code == 200:
+        response["detail"] = "Scheduled for LinkedIn publishing."
+    return response, status_code
+
+
+def _clear_linkedin_schedule(draft_id_prefix: str) -> tuple[dict[str, Any], int]:
+    row = _load_linkedin_draft_row(draft_id_prefix)
+    if row is None:
+        return {"error": "LinkedIn draft not found."}, 404
+    try:
+        from linkedin.sqlite_store import clear_schedule
+        clear_schedule(str(row.get("id", "")))
+    except Exception as exc:
+        return {"error": f"Failed to clear schedule: {exc}"}, 500
+    response, status_code = _linkedin_editor_payload(str(row.get("id", "")))
+    if status_code == 200:
+        response["detail"] = "Schedule cleared."
+    return response, status_code
+
+
+def _publish_linkedin_draft(draft_id_prefix: str, payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    row = _load_linkedin_draft_row(draft_id_prefix)
+    if row is None:
+        return {"error": "LinkedIn draft not found."}, 404
+    try:
+        from linkedin.sqlite_store import mark_published
+        mark_published(str(row.get("id", "")), linkedin_url=str(payload.get("linkedinUrl") or payload.get("linkedin_url") or ""))
+    except Exception as exc:
+        return {"error": f"Failed to mark post published: {exc}"}, 500
+    response, status_code = _linkedin_editor_payload(str(row.get("id", "")))
+    if status_code == 200:
+        response["detail"] = "Marked published."
+    return response, status_code
+
+
+def _archive_linkedin_draft(draft_id_prefix: str) -> tuple[dict[str, Any], int]:
+    row = _load_linkedin_draft_row(draft_id_prefix)
+    if row is None:
+        return {"error": "LinkedIn draft not found."}, 404
+    try:
+        from linkedin.sqlite_store import archive_draft
+        archive_draft(str(row.get("id", "")))
+    except Exception as exc:
+        return {"error": f"Failed to archive draft: {exc}"}, 500
+    response, status_code = _linkedin_editor_payload(str(row.get("id", "")))
+    if status_code == 200:
+        response["detail"] = "Archived."
+    return response, status_code
+
+
+def _source_linkedin_draft(draft_id_prefix: str, payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    row = _load_linkedin_draft_row(draft_id_prefix)
+    if row is None:
+        return {"error": "LinkedIn draft not found."}, 404
+    try:
+        from linkedin.editorial import build_source_dossier
+        from linkedin.sqlite_store import update_source_verification
+
+        verified_url = str(payload.get("verifiedSourceUrl") or payload.get("verified_source_url") or "").strip()
+        link_policy = str(payload.get("linkPolicy") or payload.get("link_policy") or "").strip()
+        update_source_verification(
+            str(row.get("id", "")),
+            verified_source_url=verified_url,
+            source_dossier=build_source_dossier(row, verified_source_url=verified_url),
+            link_policy=link_policy,
+        )
+    except Exception as exc:
+        return {"error": f"Failed to update source verification: {exc}"}, 500
+    response, status_code = _linkedin_editor_payload(str(row.get("id", "")))
+    if status_code == 200:
+        response["detail"] = "Source verification saved."
+    return response, status_code
+
+
+def _score_linkedin_draft(draft_id_prefix: str) -> tuple[dict[str, Any], int]:
+    row = _load_linkedin_draft_row(draft_id_prefix)
+    if row is None:
+        return {"error": "LinkedIn draft not found."}, 404
+    content = ""
+    if str(row.get("obsidian_path", "") or ""):
+        notes_manager = _build_notes_manager()
+        content, _, _ = _read_note_content(str(row.get("obsidian_path", "")), notes_manager=notes_manager)
+    try:
+        from linkedin.editorial import score_draft
+        from linkedin.sqlite_store import update_score
+
+        score = score_draft(row, content=content)
+        update_score(str(row.get("id", "")), score_total=int(score.get("total", 0)), score=score)
+    except Exception as exc:
+        return {"error": f"Failed to score draft: {exc}"}, 500
+    response, status_code = _linkedin_editor_payload(str(row.get("id", "")))
+    if status_code == 200:
+        response["detail"] = f"Authority score updated: {response.get('scoreTotal', 0)}/100."
+    return response, status_code
 
 
 def collect_snapshot(
@@ -2072,7 +2320,70 @@ def _render_summary_panel(snapshot: DashboardSnapshot) -> str:
 
 
 def _render_linkedin_content(snapshot: DashboardSnapshot) -> str:
+    from linkedin.editorial import next_publish_slots
+
     drafts = snapshot.linkedin_drafts
+    overdue = [item for item in drafts if item.is_overdue]
+    scheduled = [item for item in drafts if item.publish_status == "scheduled" and not item.is_overdue]
+    backlog = [
+        item for item in drafts
+        if item.publish_status in {"", "unscheduled"} and item.status in {"ready", "needs_attention"}
+    ]
+    scheduled_by_slot = {item.scheduled_for: item for item in scheduled if item.scheduled_for}
+    calendar_slots = next_publish_slots(count=8, occupied=set())
+
+    def _slot_card(slot: dict[str, str]) -> str:
+        item = scheduled_by_slot.get(slot["scheduled_for"])
+        date_label = html.escape(slot.get("date_label", ""))
+        time_label = html.escape(slot.get("time_label", "09:00"))
+        if item:
+            score = f"{item.score_total}/100" if item.score_total else "unscored"
+            body = f"""
+              <button type="button" class="li-slot-post" data-linkedin-open="{html.escape(item.lookup_id)}">
+                <strong>{html.escape(item.headline)}</strong>
+                <span>{html.escape(score)} · {html.escape(item.source_label)}</span>
+              </button>
+            """
+            state_class = " is-filled"
+        else:
+            body = '<div class="li-slot-empty">Open slot</div>'
+            state_class = ""
+        return f"""
+          <div class="li-calendar-slot{state_class}">
+            <div class="li-slot-date">{date_label}</div>
+            <div class="li-slot-time">{time_label}</div>
+            {body}
+          </div>
+        """
+
+    overdue_html = ""
+    if overdue:
+        overdue_items = "".join(
+            f"""
+              <button type="button" class="li-overdue-item" data-linkedin-open="{html.escape(item.lookup_id)}">
+                <strong>{html.escape(item.headline)}</strong>
+                <span>{html.escape(item.scheduled_for_local or "missed slot")}</span>
+              </button>
+            """
+            for item in overdue[:3]
+        )
+        overdue_html = f'<div class="li-overdue-strip"><span>{len(overdue)} missed</span>{overdue_items}</div>'
+
+    calendar_html = f"""
+      <div class="li-calendar-panel">
+        <div class="li-calendar-header">
+          <div>
+            <h3>Publishing Calendar</h3>
+            <p>Tuesday and Thursday at 09:00 Europe/Berlin</p>
+          </div>
+          <span>{len(scheduled)} scheduled · {len(backlog)} ready</span>
+        </div>
+        {overdue_html}
+        <div class="li-calendar-grid">
+          {"".join(_slot_card(slot) for slot in calendar_slots)}
+        </div>
+      </div>
+    """
 
     if not drafts:
         list_html = """
@@ -2095,6 +2406,17 @@ def _render_linkedin_content(snapshot: DashboardSnapshot) -> str:
             )
             status_icon = STATUS_ICON.get(item.status, "·")
             status_label = item.status.replace("_", " ").upper()
+            publish_label = item.publish_status.replace("_", " ").upper()
+            publish_class = " li-inline-tag--warn" if item.is_overdue else " li-inline-tag--accent" if item.publish_status == "scheduled" else ""
+            schedule_html = (
+                f'<span class="li-meta-item">SLOT <span class="li-meta-value">{html.escape(item.scheduled_for_local)}</span></span>'
+                if item.scheduled_for_local else '<span class="li-meta-item">SLOT <span class="li-meta-value">UNSCHEDULED</span></span>'
+            )
+            score_html = f'<span class="li-inline-tag">SCORE {item.score_total}/100</span>' if item.score_total else '<span class="li-inline-tag">UNSCORED</span>'
+            verification_html = (
+                '<span class="li-inline-tag li-inline-tag--accent">SOURCE VERIFIED</span>'
+                if item.verified_source_url else '<span class="li-inline-tag li-inline-tag--warn">SOURCE NEEDED</span>'
+            )
             obsidian_html = (
                 f'<span class="li-meta-item">OBSIDIAN <span class="li-meta-value" title="{html.escape(item.obsidian_path)}">'
                 f'{html.escape(item.obsidian_filename or "—")}</span></span>'
@@ -2115,6 +2437,9 @@ def _render_linkedin_content(snapshot: DashboardSnapshot) -> str:
                   <span class="li-tag">{html.escape(item.pillar_label.upper() or "LINKEDIN")}</span>
                   {parent_html}
                   {attempts_html}
+                  <span class="li-inline-tag{publish_class}">{html.escape(publish_label or "UNSCHEDULED")}</span>
+                  {score_html}
+                  {verification_html}
                 </div>
                 <div class="li-card-status" data-linkedin-card-status>{status_icon} <span class="li-status-label" data-linkedin-card-status-label>{status_label}</span></div>
               </div>
@@ -2124,6 +2449,8 @@ def _render_linkedin_content(snapshot: DashboardSnapshot) -> str:
                 <span class="li-meta-item">VOICE <span class="li-meta-value">{html.escape(item.voice.upper())}</span></span>
                 <span class="li-meta-sep">·</span>
                 <span class="li-meta-item">SOURCE <span class="li-meta-value">{html.escape(item.source_type.upper())}</span></span>
+                <span class="li-meta-sep">·</span>
+                {schedule_html}
                 <span class="li-meta-sep">·</span>
                 {obsidian_html}
               </div>
@@ -2206,6 +2533,11 @@ def _render_linkedin_content(snapshot: DashboardSnapshot) -> str:
         background: rgba(0,200,255,0.08);
         border-color: rgba(0,200,255,0.25);
       }}
+      .li-inline-tag--warn {{
+        color: #f59e0b;
+        background: rgba(245,158,11,0.08);
+        border-color: rgba(245,158,11,0.25);
+      }}
       .li-grid {{
         display: grid;
         grid-template-columns: 1fr;
@@ -2217,12 +2549,153 @@ def _render_linkedin_content(snapshot: DashboardSnapshot) -> str:
         gap: 20px;
         align-items: start;
       }}
+      .li-calendar-panel {{
+        border: 1px solid rgba(255,255,255,0.08);
+        background: #14171b;
+        border-radius: 4px;
+        padding: 16px;
+        margin-bottom: 20px;
+      }}
+      .li-calendar-header {{
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 16px;
+        margin-bottom: 16px;
+      }}
+      .li-calendar-header h3 {{
+        margin: 0 0 4px 0;
+        font-size: 18px;
+        font-weight: 590;
+        color: #f0f1f3;
+      }}
+      .li-calendar-header p,
+      .li-calendar-header span {{
+        margin: 0;
+        font-family: ui-monospace, SFMono-Regular, Roboto Mono, Menlo, Monaco, Courier New, monospace;
+        font-size: 11px;
+        color: #8f96a3;
+      }}
+      .li-calendar-header span {{
+        white-space: nowrap;
+        text-transform: uppercase;
+      }}
+      .li-calendar-grid {{
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+      }}
+      @media (max-width: 1180px) {{
+        .li-calendar-grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+      }}
+      @media (max-width: 720px) {{
+        .li-calendar-header {{ display: grid; }}
+        .li-calendar-grid {{ grid-template-columns: 1fr; }}
+      }}
+      .li-calendar-slot {{
+        display: grid;
+        grid-template-rows: auto auto 1fr;
+        min-height: 118px;
+        border: 1px solid rgba(255,255,255,0.08);
+        background: #101318;
+        border-radius: 4px;
+        padding: 12px;
+      }}
+      .li-calendar-slot.is-filled {{
+        border-color: rgba(0,200,255,0.28);
+        background: rgba(0,200,255,0.05);
+      }}
+      .li-slot-date,
+      .li-slot-time {{
+        font-family: ui-monospace, SFMono-Regular, Roboto Mono, Menlo, Monaco, Courier New, monospace;
+      }}
+      .li-slot-date {{
+        color: #f0f1f3;
+        font-size: 12px;
+        font-weight: 600;
+      }}
+      .li-slot-time {{
+        margin-top: 3px;
+        color: #00c8ff;
+        font-size: 11px;
+      }}
+      .li-slot-empty {{
+        align-self: end;
+        color: #747b86;
+        font-size: 12px;
+      }}
+      .li-slot-post,
+      .li-overdue-item {{
+        appearance: none;
+        display: grid;
+        gap: 4px;
+        width: 100%;
+        text-align: left;
+        border: 0;
+        background: transparent;
+        color: inherit;
+        padding: 0;
+        cursor: pointer;
+      }}
+      .li-slot-post {{
+        align-self: end;
+        margin-top: 14px;
+      }}
+      .li-slot-post:hover strong,
+      .li-overdue-item:hover strong {{ color: #00c8ff; }}
+      .li-slot-post strong,
+      .li-overdue-item strong {{
+        font-size: 12px;
+        line-height: 1.35;
+        color: #f0f1f3;
+        font-weight: 590;
+      }}
+      .li-slot-post span,
+      .li-overdue-item span {{
+        font-family: ui-monospace, SFMono-Regular, Roboto Mono, Menlo, Monaco, Courier New, monospace;
+        font-size: 10px;
+        color: #7a808c;
+      }}
+      .li-overdue-strip {{
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+        margin-bottom: 14px;
+        padding: 10px;
+        border: 1px solid rgba(245,158,11,0.25);
+        background: rgba(245,158,11,0.06);
+      }}
+      .li-overdue-strip > span {{
+        font-family: ui-monospace, SFMono-Regular, Roboto Mono, Menlo, Monaco, Courier New, monospace;
+        font-size: 12px;
+        color: #f59e0b;
+        text-transform: uppercase;
+      }}
+      .li-overdue-item {{
+        width: auto;
+        min-width: 180px;
+        max-width: 320px;
+      }}
       .li-list {{
         display: grid;
         gap: 14px;
       }}
+      .li-list-shell {{
+        max-height: 760px;
+        overflow-y: auto;
+        padding-right: 6px;
+        scrollbar-color: rgba(0,200,255,0.35) rgba(255,255,255,0.06);
+      }}
+      .li-list-shell::-webkit-scrollbar {{ width: 8px; }}
+      .li-list-shell::-webkit-scrollbar-track {{ background: rgba(255,255,255,0.04); }}
+      .li-list-shell::-webkit-scrollbar-thumb {{
+        background: rgba(0,200,255,0.3);
+        border-radius: 4px;
+      }}
       @media (max-width: 1080px) {{
         .li-workspace {{ grid-template-columns: 1fr; }}
+        .li-list-shell {{ max-height: 520px; }}
       }}
       .li-card {{
         appearance: none;
@@ -2415,33 +2888,80 @@ def _render_linkedin_content(snapshot: DashboardSnapshot) -> str:
       }}
       .li-editor-controls {{
         display: flex;
-        flex-wrap: wrap;
         gap: 8px;
         justify-content: flex-end;
+        align-items: center;
+      }}
+      .li-mode-switch {{
+        display: inline-flex;
+        border: 1px solid rgba(255,255,255,0.12);
+        background: #0d1014;
+        border-radius: 4px;
+        overflow: hidden;
       }}
       .li-mode-btn,
       .li-save-btn {{
         appearance: none;
-        border: 1px solid rgba(255,255,255,0.14);
+        border: 0;
         background: transparent;
         color: #b8bdc6;
-        padding: 8px 12px;
+        padding: 8px 11px;
         font: inherit;
+        font-size: 12px;
         cursor: pointer;
       }}
       .li-mode-btn.is-active {{
-        border-color: rgba(0,200,255,0.45);
         color: #00c8ff;
         background: rgba(0,200,255,0.08);
       }}
       .li-save-btn {{
-        border-color: rgba(0,200,255,0.35);
+        border: 1px solid rgba(0,200,255,0.35);
+        border-radius: 4px;
         color: #00c8ff;
+        background: rgba(0,200,255,0.06);
       }}
       .li-save-btn[disabled],
       .li-mode-btn[disabled] {{
         opacity: 0.5;
         cursor: not-allowed;
+      }}
+      .li-editor-tools {{
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        align-items: center;
+        padding: 12px;
+        border: 1px solid rgba(255,255,255,0.08);
+        background: #101318;
+        border-radius: 4px;
+      }}
+      .li-action-group {{
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }}
+      .li-tool-btn {{
+        appearance: none;
+        border: 1px solid rgba(255,255,255,0.12);
+        background: #151920;
+        border-radius: 4px;
+        color: #b8bdc6;
+        padding: 8px 10px;
+        font: inherit;
+        font-size: 12px;
+        cursor: pointer;
+      }}
+      .li-tool-btn:hover {{
+        border-color: rgba(0,200,255,0.35);
+        color: #f0f1f3;
+      }}
+      .li-tool-btn--primary {{
+        border-color: rgba(0,200,255,0.35);
+        color: #d7f7ff;
+        background: rgba(0,200,255,0.08);
+      }}
+      .li-tool-btn--muted {{
+        color: #8f96a3;
       }}
       .li-editor-status {{
         font-size: 12px;
@@ -2556,6 +3076,7 @@ def _render_linkedin_content(snapshot: DashboardSnapshot) -> str:
         <h2 class="li-section-title">LinkedIn Composer</h2>
         <span class="li-count">{len(drafts)} DRAFT{'S' if len(drafts) != 1 else ''} · JARVIS/PR/LINKEDIN COMPOSER</span>
       </div>
+      {calendar_html}
       <div class="li-workspace" data-linkedin-root>
         <div class="li-list-shell">
           {list_html}
@@ -2574,13 +3095,28 @@ def _render_linkedin_content(snapshot: DashboardSnapshot) -> str:
                 <div class="li-editor-meta" data-linkedin-meta>Open a draft to inspect or edit its markdown.</div>
               </div>
               <div class="li-editor-controls">
-                <button type="button" class="li-mode-btn is-active" data-linkedin-mode="preview">Preview</button>
-                <button type="button" class="li-mode-btn" data-linkedin-mode="edit">Edit</button>
-                <button type="button" class="li-mode-btn" data-linkedin-retry>Re-trigger</button>
+                <div class="li-mode-switch" aria-label="Editor mode">
+                  <button type="button" class="li-mode-btn is-active" data-linkedin-mode="preview">Preview</button>
+                  <button type="button" class="li-mode-btn" data-linkedin-mode="edit">Edit</button>
+                </div>
                 <button type="button" class="li-save-btn" data-linkedin-save disabled>Save</button>
               </div>
             </div>
             <div class="li-editor-status" data-linkedin-status></div>
+            <div class="li-editor-tools">
+              <div class="li-action-group">
+                <button type="button" class="li-tool-btn li-tool-btn--primary" data-linkedin-copy>Copy post</button>
+                <button type="button" class="li-tool-btn li-tool-btn--primary" data-linkedin-schedule>Schedule</button>
+                <button type="button" class="li-tool-btn li-tool-btn--primary" data-linkedin-publish>Mark published</button>
+              </div>
+              <div class="li-action-group">
+                <button type="button" class="li-tool-btn" data-linkedin-source>Verify source</button>
+                <button type="button" class="li-tool-btn" data-linkedin-score>Score</button>
+                <button type="button" class="li-tool-btn" data-linkedin-retry>Re-trigger</button>
+                <button type="button" class="li-tool-btn li-tool-btn--muted" data-linkedin-clear-schedule>Clear schedule</button>
+                <button type="button" class="li-tool-btn li-tool-btn--muted" data-linkedin-archive>Archive</button>
+              </div>
+            </div>
             <textarea class="li-editor-textarea" data-linkedin-editor hidden spellcheck="false"></textarea>
             <div class="li-editor-preview" data-linkedin-preview></div>
           </div>
@@ -2605,7 +3141,7 @@ def _render_tab_content(snapshot: DashboardSnapshot, tab: str) -> str:
 
 def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
     active_tab = _normalize_tab(tab)
-    initial_summary = _render_summary_panel(snapshot)
+    initial_summary = "" if active_tab == "linkedin" else _render_summary_panel(snapshot)
     initial_tab_content = _render_tab_content(snapshot, active_tab)
     logo_svg = _load_dashboard_logo_svg()
     runtime_info = _dashboard_runtime_info()
@@ -3040,6 +3576,9 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
         activeTab = allowedTabs.has(tab) ? tab : "overview";
         for (const button of navButtons) {{
           button.classList.toggle("active", button.dataset.tab === activeTab);
+        }}
+        if (activeTab === "linkedin" && summaryPanel) {{
+          summaryPanel.innerHTML = "";
         }}
         scheduleCurrentTabRefresh();
         if (updateHistory) {{
@@ -3504,6 +4043,10 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
         title.textContent = detail.headline || "Untitled draft";
         meta.textContent = [
           detail.status ? String(detail.status).replace(/_/g, " ") : "",
+          detail.publishStatus ? "publish " + String(detail.publishStatus).replace(/_/g, " ") : "",
+          detail.scheduledForLocal ? "slot " + detail.scheduledForLocal : "",
+          detail.scoreTotal ? "score " + detail.scoreTotal + "/100" : "unscored",
+          detail.verifiedSourceUrl ? "source verified" : "source needed",
           detail.voice || "",
           detail.pillarLabel || "",
           detail.obsidianPath || "",
@@ -3668,6 +4211,82 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
         }}
       }}
 
+      async function postLinkedInAction(action, body = {{}}) {{
+        const draftId = linkedinState.selectedDraftId;
+        if (!draftId || linkedinState.saveInFlight) {{
+          return;
+        }}
+        if (linkedinState.dirtyContent.has(draftId) && action !== "source") {{
+          setLinkedInStatus("Save or discard your edits before this action.", "error");
+          return;
+        }}
+        linkedinState.saveInFlight = true;
+        setLinkedInStatus("Updating LinkedIn workflow…", "");
+        const controller = trackController(new AbortController());
+        try {{
+          const payload = await fetchJson(
+            "/api/linkedin/drafts/" + encodeURIComponent(draftId) + "/" + action,
+            {{
+              method: "POST",
+              signal: controller.signal,
+              headers: {{
+                "Content-Type": "application/json",
+              }},
+              body: JSON.stringify(body || {{}}),
+            }}
+          );
+          linkedinState.detailCache.set(draftId, payload);
+          applyLinkedInDetail(payload);
+          setLinkedInStatus(payload.detail || "Updated.", "success");
+          cache.delete("linkedin");
+          void refreshCurrentTab();
+        }} catch (error) {{
+          if (error.name !== "AbortError") {{
+            setLinkedInStatus(error.message || "LinkedIn action failed.", "error");
+            console.error(error);
+          }}
+        }} finally {{
+          linkedinState.saveInFlight = false;
+          untrackController(controller);
+        }}
+      }}
+
+      async function copyLinkedInPost() {{
+        const value = stripMarkdownFrontmatter(currentLinkedInValue()).trim();
+        if (!value) {{
+          setLinkedInStatus("Nothing to copy.", "error");
+          return;
+        }}
+        try {{
+          await navigator.clipboard.writeText(value);
+          setLinkedInStatus("Post copied. Paste it into LinkedIn, then mark published.", "success");
+        }} catch (error) {{
+          setLinkedInStatus("Clipboard unavailable. Select the text and copy manually.", "error");
+        }}
+      }}
+
+      function verifyLinkedInSource() {{
+        const draftId = linkedinState.selectedDraftId;
+        const detail = draftId ? linkedinState.detailCache.get(draftId) : null;
+        const current = detail ? (detail.verifiedSourceUrl || detail.sourceUrl || "") : "";
+        const value = window.prompt("Verified source URL", current);
+        if (value === null) {{
+          return;
+        }}
+        void postLinkedInAction("source", {{
+          verifiedSourceUrl: value.trim(),
+          linkPolicy: detail ? detail.linkPolicy || "first_comment" : "first_comment",
+        }});
+      }}
+
+      function markLinkedInPublished() {{
+        const value = window.prompt("LinkedIn post URL (optional)", "");
+        if (value === null) {{
+          return;
+        }}
+        void postLinkedInAction("publish", {{ linkedinUrl: value.trim() }});
+      }}
+
       function hydrateLinkedInTab() {{
         if (activeTab !== "linkedin" || !linkedInRoot()) {{
           return;
@@ -3718,6 +4337,12 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
       }}
 
       async function refreshSummary() {{
+        if (activeTab === "linkedin") {{
+          if (summaryPanel) {{
+            summaryPanel.innerHTML = "";
+          }}
+          return null;
+        }}
         if (document.visibilityState !== "visible" || summaryRequest) {{
           return summaryRequest;
         }}
@@ -3827,6 +4452,48 @@ def _render_snapshot(snapshot: DashboardSnapshot, tab: str = "overview") -> str:
         const retryButton = event.target.closest("[data-linkedin-retry]");
         if (retryButton && tabContent.contains(retryButton)) {{
           void retryLinkedInDraft();
+          return;
+        }}
+
+        const copyButton = event.target.closest("[data-linkedin-copy]");
+        if (copyButton && tabContent.contains(copyButton)) {{
+          void copyLinkedInPost();
+          return;
+        }}
+
+        const scheduleButton = event.target.closest("[data-linkedin-schedule]");
+        if (scheduleButton && tabContent.contains(scheduleButton)) {{
+          void postLinkedInAction("schedule", {{}});
+          return;
+        }}
+
+        const clearScheduleButton = event.target.closest("[data-linkedin-clear-schedule]");
+        if (clearScheduleButton && tabContent.contains(clearScheduleButton)) {{
+          void postLinkedInAction("clear-schedule", {{}});
+          return;
+        }}
+
+        const sourceButton = event.target.closest("[data-linkedin-source]");
+        if (sourceButton && tabContent.contains(sourceButton)) {{
+          verifyLinkedInSource();
+          return;
+        }}
+
+        const scoreButton = event.target.closest("[data-linkedin-score]");
+        if (scoreButton && tabContent.contains(scoreButton)) {{
+          void postLinkedInAction("score", {{}});
+          return;
+        }}
+
+        const publishButton = event.target.closest("[data-linkedin-publish]");
+        if (publishButton && tabContent.contains(publishButton)) {{
+          markLinkedInPublished();
+          return;
+        }}
+
+        const archiveButton = event.target.closest("[data-linkedin-archive]");
+        if (archiveButton && tabContent.contains(archiveButton)) {{
+          void postLinkedInAction("archive", {{}});
         }}
       }});
 
@@ -3996,6 +4663,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
             _write_response(self, body, "application/json; charset=utf-8")
             return
 
+        if parsed.path == "/api/linkedin/calendar":
+            payload, status_code = _linkedin_calendar_payload()
+            body = json.dumps(payload).encode("utf-8")
+            _write_response(
+                self,
+                body,
+                "application/json; charset=utf-8",
+                status_code=status_code,
+            )
+            return
+
         if parsed.path.startswith("/api/linkedin/drafts/"):
             draft_id_prefix = parsed.path.rsplit("/", 1)[-1]
             payload, status_code = _linkedin_editor_payload(draft_id_prefix)
@@ -4029,10 +4707,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_error(404, "Not Found")
             return
 
-        retry_request = parsed.path.endswith("/retry")
-        draft_id_prefix = parsed.path.split("/api/linkedin/drafts/", 1)[1].strip("/")
-        if retry_request:
-            draft_id_prefix = draft_id_prefix[: -len("/retry")].rstrip("/")
+        remainder = parsed.path.split("/api/linkedin/drafts/", 1)[1].strip("/")
+        parts = [part for part in remainder.split("/") if part]
+        draft_id_prefix = parts[0] if parts else ""
+        action = parts[1] if len(parts) > 1 else "save"
         try:
             content_length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
@@ -4050,13 +4728,27 @@ class DashboardHandler(BaseHTTPRequestHandler):
             )
             return
 
-        if retry_request:
+        if action == "retry":
             response_payload, status_code = _retry_linkedin_draft_processing(draft_id_prefix)
-        else:
+        elif action == "schedule":
+            response_payload, status_code = _schedule_linkedin_draft(draft_id_prefix, payload)
+        elif action == "clear-schedule":
+            response_payload, status_code = _clear_linkedin_schedule(draft_id_prefix)
+        elif action == "publish":
+            response_payload, status_code = _publish_linkedin_draft(draft_id_prefix, payload)
+        elif action == "archive":
+            response_payload, status_code = _archive_linkedin_draft(draft_id_prefix)
+        elif action == "source":
+            response_payload, status_code = _source_linkedin_draft(draft_id_prefix, payload)
+        elif action == "score":
+            response_payload, status_code = _score_linkedin_draft(draft_id_prefix)
+        elif action == "save":
             response_payload, status_code = _save_linkedin_draft_content(
                 draft_id_prefix,
                 str(payload.get("content", "")),
             )
+        else:
+            response_payload, status_code = {"error": "Unsupported LinkedIn action."}, 404
         response = json.dumps(response_payload).encode("utf-8")
         _write_response(
             self,

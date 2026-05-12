@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import logging
 from json import dumps as json_dumps
 from datetime import datetime, timezone
@@ -9,8 +11,17 @@ from github_issues import GitHubAPIError, GitHubConfigError, GitHubIssuesClient,
 from core.log_reader import read_logs as query_logs
 from core.llmops import record_llm_call
 from core.llm_client import call_with_free_model_retry, create_llm_client, get_model_name
-from core.prompts import build_system_prompt
+from core.prompts import PromptBuildResult, build_system_prompt_result
 from core.source_reader import read_source_file as read_project_source_file
+from core.tracing import (
+    generation_cost_details,
+    generation_usage_details,
+    start_generation,
+    start_span,
+    start_tool_observation,
+    start_trace,
+    summarize_text,
+)
 from core.time_utils import (
     contains_explicit_date,
     day_bounds_for_calendar,
@@ -50,6 +61,25 @@ TOOLS: list[dict] = [
                 },
             },
             "required": ["title"],
+        },
+    },
+    {
+        "name": "list_github_issues",
+        "description": "List issues from the configured GitHub repository. Read-only.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "state": {
+                    "type": "string",
+                    "enum": ["open", "closed", "all"],
+                    "default": "open",
+                },
+                "limit": {
+                    "type": "integer",
+                    "default": 5,
+                    "description": "Maximum number of issues to return.",
+                },
+            },
         },
     },
     {
@@ -113,16 +143,20 @@ TOOLS: list[dict] = [
     },
     {
         "name": "read_source_file",
-        "description": (
-            "Read a source or project file from the Marvis codebase. "
-            "This is strictly read-only and sandboxed to the project root."
-        ),
+        "description": "Read a source file from the Marvis project.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Project-relative file path like 'core/agent.py' or an absolute path inside the Marvis project root.",
+                },
+                "start_line": {
+                    "type": "integer",
+                    "description": "Optional 1-based start line.",
+                },
+                "end_line": {
+                    "type": "integer",
+                    "description": "Optional 1-based end line.",
                 },
             },
             "required": ["path"],
@@ -145,12 +179,15 @@ TOOLS: list[dict] = [
                 "level": {
                     "type": "string",
                     "enum": ["INFO", "WARNING", "ERROR", "ALL"],
-                    "description": "Optional log level filter.",
                 },
                 "limit": {
                     "type": "integer",
-                    "default": 20,
-                    "description": "Maximum number of log entries to return.",
+                    "default": 10,
+                },
+                "include_metadata": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Include raw metadata blobs.",
                 },
             },
         },
@@ -544,15 +581,135 @@ TOOLS: list[dict] = [
     },
 ]
 
+_GITHUB_TOOL_NAMES = {
+    "create_github_issue",
+    "list_github_issues",
+    "list_pull_requests",
+    "read_pull_request",
+    "list_commits",
+    "read_commit",
+}
+_NOTES_TOOL_NAMES = {
+    "create_note",
+    "append_note",
+    "update_note",
+    "search_notes",
+    "read_note",
+    "list_recent_notes",
+}
+_CALENDAR_TOOL_NAMES = {"check_calendar", "create_event"}
+_REMINDER_TOOL_NAMES = {"schedule_message", "list_reminders", "cancel_reminder"}
+_DRIVE_TOOL_NAMES = {"search_drive", "read_drive_file"}
+_TOOL_DESCRIPTION_OVERRIDES: dict[str, str] = {
+    "create_github_issue": "Create a GitHub issue in the configured repository.",
+    "list_github_issues": "List issues from the configured repository.",
+    "list_pull_requests": "List pull requests from the configured repository.",
+    "read_pull_request": "Read one pull request by number.",
+    "list_commits": "List recent commits from the configured repository.",
+    "read_commit": "Read one commit by SHA.",
+    "read_source_file": "Read a source file from the project.",
+    "read_logs": "Read local operational logs.",
+    "schedule_message": "Schedule a Telegram reminder.",
+    "list_reminders": "List reminders.",
+    "cancel_reminder": "Cancel a reminder by ID.",
+    "remember": "Store or update a memory.",
+    "recall": "Search memories semantically.",
+    "forget": "Delete a memory by topic.",
+    "list_memories": "List stored memories.",
+    "search_drive": "Search Google Drive files.",
+    "read_drive_file": "Read one Google Drive file by ID.",
+    "create_note": "Create an Obsidian note.",
+    "append_note": "Append Markdown to a note.",
+    "update_note": "Replace or edit an existing note.",
+    "search_notes": "Search notes by text.",
+    "read_note": "Read one note by path.",
+    "list_recent_notes": "List recent notes.",
+    "check_calendar": "Check calendar events.",
+    "create_event": "Create a calendar event.",
+    "create_task": "Create a task.",
+    "list_tasks": "List tasks.",
+    "complete_task": "Mark a task as done.",
+    "financial_summary": "Summarize stored financial records.",
+}
+_TOOL_PROPERTY_DESCRIPTION_OVERRIDES: dict[tuple[str, str], str] = {
+    ("schedule_message", "when"): "Natural date/time or ISO datetime.",
+    ("schedule_message", "recurrence"): "Optional repeat rule.",
+    ("schedule_message", "until_task_done"): "Stop after the linked task is done.",
+    ("recall", "n_results"): "Maximum results.",
+    ("read_drive_file", "file_id"): "Drive file ID from search_drive.",
+    ("search_notes", "folder"): "Optional folder.",
+    ("check_calendar", "date_expression"): "Relative date like today or Monday.",
+    ("create_event", "when"): "Natural-language date/time.",
+    ("create_event", "start"): "ISO start datetime.",
+    ("create_event", "end"): "ISO end datetime.",
+    ("create_task", "due_date_expression"): "Relative due date.",
+    ("create_task", "due_date"): "Explicit YYYY-MM-DD due date.",
+    ("read_source_file", "start_line"): "1-based start line.",
+    ("read_source_file", "end_line"): "1-based end line.",
+    ("read_logs", "date_expression"): "Local date like today or 2026-04-10.",
+    ("read_logs", "level"): "INFO, WARNING, ERROR, or ALL.",
+    ("read_logs", "include_metadata"): "Include raw metadata blobs.",
+}
+
+
+def _compact_schema_definition(tool_name: str, schema: dict) -> dict:
+    compact: dict = {}
+    for key in ("type", "enum", "default", "required"):
+        if key in schema:
+            compact[key] = schema[key]
+
+    if "items" in schema and isinstance(schema["items"], dict):
+        compact["items"] = _compact_schema_definition(tool_name, schema["items"])
+
+    if "properties" in schema and isinstance(schema["properties"], dict):
+        compact_properties: dict[str, dict] = {}
+        for property_name, property_schema in schema["properties"].items():
+            if not isinstance(property_schema, dict):
+                continue
+            compact_property = _compact_schema_definition(tool_name, property_schema)
+            description = _TOOL_PROPERTY_DESCRIPTION_OVERRIDES.get((tool_name, property_name))
+            if description:
+                compact_property["description"] = description
+            compact_properties[property_name] = compact_property
+        compact["properties"] = compact_properties
+
+    return compact
+
+
+def _compact_tool_definition(tool: dict) -> dict:
+    name = str(tool["name"])
+    return {
+        "name": name,
+        "description": _TOOL_DESCRIPTION_OVERRIDES.get(name, str(tool.get("description", "")).split(".")[0].strip() + "."),
+        "input_schema": _compact_schema_definition(name, tool.get("input_schema", {})),
+    }
+
+
+def _format_line_numbered_source(text: str, start_line: int | None) -> str:
+    if start_line is None:
+        return text
+    lines = text.splitlines()
+    numbered_lines = [f"{start_line + index:>4}: {line}" for index, line in enumerate(lines)]
+    return "\n".join(numbered_lines)
+
 
 class JarvisAgent:
-    def __init__(self, memory_manager: MemoryManager, drive_client=None, calendar_client=None, notes_manager=None, reminder_manager=None):
+    def __init__(
+        self,
+        memory_manager: MemoryManager,
+        drive_client=None,
+        calendar_client=None,
+        notes_manager=None,
+        reminder_manager=None,
+        chat_reset_manager=None,
+    ):
         self._client = create_llm_client()
         self._memory = memory_manager
         self._drive = drive_client
         self._calendar = calendar_client
         self._notes = notes_manager
         self._reminders = reminder_manager
+        self._chat_reset = chat_reset_manager
         self._history: list[dict] = []
         self._current_user_message = ""
 
@@ -560,14 +717,71 @@ class JarvisAgent:
     # Public
     # ------------------------------------------------------------------
 
-    def chat(self, user_message: str) -> str:
+    def chat(
+        self,
+        user_message: str,
+        *,
+        session_id: str | None = None,
+        user_id: str | None = None,
+        trace_metadata: dict | None = None,
+        trace_tags: list[str] | None = None,
+    ) -> str:
         """Process a user message and return Jarvis's response."""
         self._current_user_message = user_message
         self._history.append({"role": "user", "content": user_message})
         self._trim_history()
 
-        system_prompt = build_system_prompt(self._memory, user_message)
-        response_text = self._run_loop(system_prompt)
+        prompt_input = {"user_message_chars": len(user_message)}
+        if getattr(self._memory, "count", None):
+            try:
+                prompt_input["memory_store_count"] = self._memory.count()
+            except Exception:
+                pass
+
+        with start_trace(
+            name="chat-turn",
+            session_id=session_id,
+            user_id=user_id,
+            input=summarize_text(user_message, label="telegram-message"),
+            metadata={
+                "channel": "chat",
+                "task": "chat",
+                **(trace_metadata or {}),
+            },
+            tags=trace_tags or ["chat"],
+        ) as trace:
+            with start_span(
+                name="build-chat-prompt",
+                input=prompt_input,
+                metadata={"query": summarize_text(user_message, label="memory-query")},
+            ) as prompt_span:
+                prompt_result = build_system_prompt_result(self._memory, user_message)
+                prompt_span.update(
+                    output={"system_prompt_chars": len(prompt_result.prompt)},
+                    metadata={
+                        "candidate_count": prompt_result.candidate_count,
+                        "selected_count": prompt_result.memory_count,
+                        "selected_topics": prompt_result.memory_topics,
+                        "selected_total_chars": prompt_result.memory_chars,
+                    },
+                )
+
+            active_tools = self._build_active_tools()
+            response_text = self._run_loop(prompt_result, active_tools)
+            trace.update_trace(
+                metadata={
+                    "history_messages": len(self._history),
+                    "system_prompt_chars": len(prompt_result.prompt),
+                    "tool_schema_chars": self._tool_schema_chars(active_tools),
+                    "active_tool_names": [tool["name"] for tool in active_tools],
+                    "retrieved_memory_count": prompt_result.memory_count,
+                    "retrieved_memory_chars": prompt_result.memory_chars,
+                    "user_message_chars": len(user_message),
+                    "final_response_chars": len(response_text),
+                    **(trace_metadata or {}),
+                },
+                output=summarize_text(response_text, label="assistant-response"),
+            )
 
         self._history.append({"role": "assistant", "content": response_text})
         return response_text
@@ -575,43 +789,84 @@ class JarvisAgent:
     def reset_history(self) -> None:
         self._history.clear()
 
+    def history_is_empty(self) -> bool:
+        return len(self._history) == 0
+
     # ------------------------------------------------------------------
     # Private — agent loop
     # ------------------------------------------------------------------
 
-    def _run_loop(self, system_prompt: str) -> str:
+    def _run_loop(self, prompt_result: PromptBuildResult, active_tools: list[dict]) -> str:
         messages = list(self._history)
+        base_metadata = {
+            "channel": "chat",
+            "system_prompt_chars": len(prompt_result.prompt),
+            "tool_schema_chars": self._tool_schema_chars(active_tools),
+            "active_tool_names": [tool["name"] for tool in active_tools],
+            "retrieved_memory_count": prompt_result.memory_count,
+            "retrieved_memory_chars": prompt_result.memory_chars,
+            "user_message_chars": len(self._current_user_message or ""),
+        }
+        tool_result_chars_total = 0
+        tool_result_chars_by_name: dict[str, int] = {}
 
         while True:
             model_name = get_model_name()
             started_at = datetime.now(timezone.utc).isoformat()
             started_clock = monotonic()
-            try:
-                response = call_with_free_model_retry(
-                    lambda: self._client.messages.create(
+            response_text_current = ""
+            with start_generation(
+                name="chat-generation",
+                input={
+                    "system_prompt_chars": len(prompt_result.prompt),
+                    "history_messages": len(messages),
+                    "tool_schema_chars": base_metadata["tool_schema_chars"],
+                },
+                metadata={
+                    **base_metadata,
+                    "history_messages": len(messages),
+                    "tool_result_chars_total": tool_result_chars_total,
+                    "tool_result_chars_by_name": dict(tool_result_chars_by_name),
+                },
+                model=model_name,
+                model_parameters={"max_tokens": settings.MAX_TOKENS},
+            ) as generation:
+                try:
+                    response = call_with_free_model_retry(
+                        lambda: self._client.messages.create(
+                            model=model_name,
+                            max_tokens=settings.MAX_TOKENS,
+                            system=prompt_result.prompt,
+                            tools=active_tools,
+                            messages=messages,
+                        ),
+                        model_name,
+                    )
+                except Exception as exc:
+                    record_llm_call(
+                        task="chat",
                         model=model_name,
-                        max_tokens=settings.MAX_TOKENS,
-                        system=system_prompt,
-                        tools=TOOLS,
-                        messages=messages,
-                    ),
-                    model_name,
-                )
-            except Exception as exc:
-                record_llm_call(
-                    task="chat",
-                    model=model_name,
-                    status="api_error",
-                    started_at=started_at,
-                    latency_ms=(monotonic() - started_clock) * 1000,
-                    error=str(exc),
-                    metadata={"channel": "chat", "history_messages": len(messages)},
-                )
-                raise
+                        status="api_error",
+                        started_at=started_at,
+                        latency_ms=(monotonic() - started_clock) * 1000,
+                        error=str(exc),
+                        metadata={
+                            **base_metadata,
+                            "history_messages": len(messages),
+                            "tool_result_chars_total": tool_result_chars_total,
+                            "tool_result_chars_by_name": dict(tool_result_chars_by_name),
+                        },
+                    )
+                    generation.update(
+                        metadata={"status": "api_error", "history_messages": len(messages)},
+                        status_message=str(exc),
+                    )
+                    raise
 
             # Collect all tool uses and text from this response
             tool_uses = [b for b in response.content if b.type == "tool_use"]
             text_blocks = [b for b in response.content if b.type == "text"]
+            response_text_current = "\n".join(getattr(block, "text", "") for block in text_blocks).strip()
             record_llm_call(
                 task="chat",
                 model=model_name,
@@ -620,16 +875,30 @@ class JarvisAgent:
                 latency_ms=(monotonic() - started_clock) * 1000,
                 response=response,
                 metadata={
-                    "channel": "chat",
+                    **base_metadata,
                     "history_messages": len(messages),
                     "tool_use_count": len(tool_uses),
                     "text_block_count": len(text_blocks),
+                    "tool_result_chars_total": tool_result_chars_total,
+                    "tool_result_chars_by_name": dict(tool_result_chars_by_name),
+                    "response_text_chars": len(response_text_current),
                 },
+            )
+            generation.update(
+                output=response_text_current or None,
+                metadata={
+                    "history_messages": len(messages),
+                    "tool_use_count": len(tool_uses),
+                    "text_block_count": len(text_blocks),
+                    "tool_result_chars_total": tool_result_chars_total,
+                    "tool_result_chars_by_name": dict(tool_result_chars_by_name),
+                },
+                usage_details=generation_usage_details(response),
+                cost_details=generation_cost_details(model_name, response),
             )
 
             if response.stop_reason == "end_turn" or not tool_uses:
-                # Done — return combined text
-                return "\n".join(b.text for b in text_blocks).strip()
+                return response_text_current
 
             # Append assistant message with all content blocks
             messages.append({"role": "assistant", "content": response.content})
@@ -637,7 +906,27 @@ class JarvisAgent:
             # Execute all tool calls and collect results
             tool_results = []
             for tool_use in tool_uses:
-                result = self._execute_tool(tool_use.name, tool_use.input)
+                tool_input_chars = len(json_dumps(tool_use.input, ensure_ascii=False))
+                tool_started = monotonic()
+                with start_tool_observation(
+                    name=f"tool:{tool_use.name}",
+                    input={"tool_name": tool_use.name, "input": tool_use.input},
+                    metadata={"tool_name": tool_use.name, "input_chars": tool_input_chars},
+                ) as tool_observation:
+                    result = self._execute_tool(tool_use.name, tool_use.input)
+                    output_chars = len(result)
+                    tool_result_chars_total += output_chars
+                    tool_result_chars_by_name[tool_use.name] = tool_result_chars_by_name.get(tool_use.name, 0) + output_chars
+                    tool_observation.update(
+                        output=result,
+                        metadata={
+                            "tool_name": tool_use.name,
+                            "input_chars": tool_input_chars,
+                            "output_chars": output_chars,
+                            "status": "error" if result.lower().startswith(("error ", "could not ", "failed ")) else "ok",
+                            "latency_ms": round((monotonic() - tool_started) * 1000, 2),
+                        },
+                    )
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": tool_use.id,
@@ -650,6 +939,8 @@ class JarvisAgent:
         try:
             if name == "create_github_issue":
                 return self._tool_create_github_issue(inputs)
+            elif name == "list_github_issues":
+                return self._tool_list_github_issues(inputs)
             elif name == "list_pull_requests":
                 return self._tool_list_pull_requests(inputs)
             elif name == "read_pull_request":
@@ -716,6 +1007,35 @@ class JarvisAgent:
             return None
         return extract_relative_date_expression(text)
 
+    def _github_tools_available(self) -> bool:
+        try:
+            load_github_client_config()
+            return True
+        except GitHubConfigError:
+            return False
+
+    def _build_active_tools(self) -> list[dict]:
+        tools: list[dict] = []
+        github_enabled = self._github_tools_available()
+        for tool in TOOLS:
+            name = str(tool["name"])
+            if name in _GITHUB_TOOL_NAMES and not github_enabled:
+                continue
+            if name in _NOTES_TOOL_NAMES and not self._notes:
+                continue
+            if name in _CALENDAR_TOOL_NAMES and not self._calendar:
+                continue
+            if name in _REMINDER_TOOL_NAMES and not self._reminders:
+                continue
+            if name in _DRIVE_TOOL_NAMES and not self._drive:
+                continue
+            tools.append(_compact_tool_definition(tool))
+        return tools
+
+    @staticmethod
+    def _tool_schema_chars(tools: list[dict]) -> int:
+        return len(json_dumps(tools, ensure_ascii=False, separators=(",", ":")))
+
     # ------------------------------------------------------------------
     # Tool implementations
     # ------------------------------------------------------------------
@@ -739,6 +1059,31 @@ class JarvisAgent:
         if issue.labels:
             labels_text = f" [labels: {', '.join(issue.labels)}]"
         return f"Created GitHub issue #{issue.number}: {issue.title}{labels_text}\n{issue.url}"
+
+    def _tool_list_github_issues(self, inputs: dict) -> str:
+        try:
+            client = self._github_client()
+            issues = client.list_issues(
+                state=inputs.get("state", "open"),
+                limit=inputs.get("limit", 5),
+            )
+        except (GitHubConfigError, GitHubAPIError) as e:
+            return f"Could not read GitHub issues: {e}"
+
+        if not issues:
+            return "No GitHub issues found."
+
+        lines = []
+        for issue in issues:
+            label_str = f" [{', '.join(issue.labels)}]" if issue.labels else ""
+            assignee_str = f" assigned to {', '.join(issue.assignees)}" if issue.assignees else ""
+            line = f"- Issue #{issue.number} [{issue.state}] {issue.title}{label_str}{assignee_str}"
+            if issue.updated_at:
+                line += f"\n  Updated: {issue.updated_at}"
+            if issue.url:
+                line += f"\n  {issue.url}"
+            lines.append(line)
+        return "\n".join(lines)
 
     def _tool_list_pull_requests(self, inputs: dict) -> str:
         try:
@@ -790,7 +1135,7 @@ class JarvisAgent:
         if pr.body:
             lines.append("")
             lines.append("Body:")
-            lines.append(pr.body[:4000])
+            lines.append(pr.body[:2000])
         if pr.url:
             lines.append("")
             lines.append(pr.url)
@@ -849,21 +1194,33 @@ class JarvisAgent:
 
     def _tool_read_source_file(self, inputs: dict) -> str:
         try:
-            result = read_project_source_file(inputs["path"])
+            result = read_project_source_file(
+                inputs["path"],
+                start_line=inputs.get("start_line"),
+                end_line=inputs.get("end_line"),
+            )
         except (FileNotFoundError, ValueError) as e:
             return f"Could not read source file: {e}"
 
+        content = _format_line_numbered_source(str(result["content"]), result.get("start_line"))
         suffix = ""
         if result["truncated"]:
             suffix = "\n\n[...truncated]"
-        return f"Contents of {result['path']}:\n\n{result['content']}{suffix}"
+        if result.get("start_line") is not None and result.get("end_line") is not None:
+            header = (
+                f"Contents of {result['path']} "
+                f"(lines {result['start_line']}-{result['end_line']} of {result.get('total_lines', '?')}):"
+            )
+        else:
+            header = f"Contents of {result['path']}:"
+        return f"{header}\n\n{content}{suffix}"
 
     def _tool_read_logs(self, inputs: dict) -> str:
         try:
             records = query_logs(
                 date_expression=inputs.get("date_expression"),
                 level=inputs.get("level"),
-                limit=inputs.get("limit", 20),
+                limit=inputs.get("limit", 10),
             )
         except ValueError as e:
             return f"Could not read logs: {e}"
@@ -871,6 +1228,7 @@ class JarvisAgent:
         if not records:
             return "No log entries found."
 
+        include_metadata = inputs.get("include_metadata", False)
         lines = []
         for record in records:
             line = (
@@ -888,8 +1246,11 @@ class JarvisAgent:
                 details.append(f"op_id={record['op_id']}")
             if details:
                 line += f"\n  {' | '.join(details)}"
-            if record.get("metadata"):
-                line += f"\n  metadata={json_dumps(record['metadata'], ensure_ascii=False, sort_keys=True)}"
+            if include_metadata and record.get("metadata"):
+                metadata_json = json_dumps(record["metadata"], ensure_ascii=False, sort_keys=True)
+                if len(metadata_json) > 500:
+                    metadata_json = metadata_json[:497] + "..."
+                line += f"\n  metadata={metadata_json}"
             lines.append(line)
         return "\n".join(lines)
 
@@ -985,13 +1346,58 @@ class JarvisAgent:
         if not self._drive:
             return "Drive client not initialised."
         file_id = inputs["file_id"]
+
+        if settings.JARVIS_ANONYMIZATION_ENABLED:
+            from utils.anonymization import prepare_text_for_remote_processing
+            from utils.anonymization_store import get_anonymized_document, upsert_anonymized_document
+
+            stored = get_anonymized_document(file_id)
+            if stored and stored.sanitized_text:
+                text = stored.sanitized_text
+                if len(text) > 4000:
+                    text = text[:4000] + f"\n\n[...truncated - {len(text) - 4000} more chars]"
+                return f"Contents of '{stored.original_filename}':\n\n{text}"
+
         try:
             data, filename, mime_type = self._drive.download_file(file_id)
         except Exception as e:
             return f"Failed to download file: {e}"
 
         from utils.text_extraction import describe_image, extract_text
-        if mime_type.startswith("image/"):
+
+        if settings.JARVIS_ANONYMIZATION_ENABLED:
+            if mime_type.startswith("image/"):
+                return (
+                    f"Could not read '{filename}' safely because anonymization is enabled and "
+                    "no local-safe text extraction exists for image-only documents yet."
+                )
+
+            extracted_text = extract_text(data, mime_type, filename)
+            model_text, anonymization_result, review_reason = prepare_text_for_remote_processing(
+                extracted_text,
+                filename=filename,
+                mime_type=mime_type,
+                raw_data=data,
+            )
+            if review_reason or not model_text:
+                return (
+                    f"Could not read '{filename}' safely because anonymized text is unavailable: "
+                    f"{review_reason or 'empty document text'}."
+                )
+            if anonymization_result:
+                upsert_anonymized_document(
+                    drive_file_id=file_id,
+                    content_sha256=anonymization_result.content_sha256,
+                    original_filename=filename,
+                    mime_type=mime_type,
+                    sanitized_text=anonymization_result.sanitized_text,
+                    backend=anonymization_result.backend,
+                    model=anonymization_result.model,
+                    replacement_counts=anonymization_result.replacement_counts,
+                    truncated=anonymization_result.truncated,
+                )
+            text = model_text
+        elif mime_type.startswith("image/"):
             text = describe_image(data, mime_type)
         else:
             text = extract_text(data, mime_type, filename)
@@ -1000,9 +1406,9 @@ class JarvisAgent:
             return f"Could not extract text from '{filename}' (type: {mime_type})."
 
         # Truncate to avoid blowing context window
-        max_chars = 8000
+        max_chars = 4000
         if len(text) > max_chars:
-            text = text[:max_chars] + f"\n\n[...truncated — {len(text) - max_chars} more chars]"
+            text = text[:max_chars] + f"\n\n[...truncated - {len(text) - max_chars} more chars]"
         return f"Contents of '{filename}':\n\n{text}"
 
     def _tool_create_note(self, inputs: dict) -> str:
@@ -1062,7 +1468,7 @@ class JarvisAgent:
     def _tool_read_note(self, inputs: dict) -> str:
         if not self._notes:
             return "Notes workspace not initialised."
-        note = self._notes.read_note(inputs["path"])
+        note = self._notes.read_note(inputs["path"], max_chars=4000)
         return f"Contents of {note['path']}:\n\n{note['content']}"
 
     def _tool_list_recent_notes(self, inputs: dict) -> str:
@@ -1142,7 +1548,8 @@ class JarvisAgent:
             short_id = t["id"][:8]
             due_str = f" [due: {t['due_date']}]" if t.get("due_date") else ""
             status_str = f" [{t['status']}]" if status == "all" else ""
-            lines.append(f"- [{short_id}]{due_str}{status_str} {t['description']}")
+            source_str = " [reminder]" if status == "all" and t.get("source") == "reminder" else ""
+            lines.append(f"- [{short_id}]{due_str}{status_str}{source_str} {t['description']}")
         return "\n".join(lines)
 
     def _tool_complete_task(self, inputs: dict) -> str:

@@ -32,7 +32,7 @@ _CATEGORY_ALIASES = {
 }
 
 _FINANCIAL_PROMPT = """\
-You are a financial document parser. Extract key financial data from the document text below.
+Extract financial fields from this document text.
 
 Respond ONLY with a JSON object:
 {{
@@ -48,7 +48,7 @@ If this is not a financial document or the data cannot be extracted, respond wit
   "is_financial": false
 }}
 
-The document may be in English or German. Extract amounts regardless of currency symbol (€, EUR, $, etc.).
+The document may be in English or German. Handle common currency symbols.
 
 Document text:
 {text}
@@ -126,7 +126,7 @@ def extract_financial_data(text_content: str, filename: str) -> Optional[dict]:
     if not text_content.strip():
         return None
 
-    prompt = _FINANCIAL_PROMPT.format(text=text_content[:3000])
+    prompt = _FINANCIAL_PROMPT.format(text=text_content[:2000])
 
     try:
         return generate_validated_json(

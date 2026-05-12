@@ -1,8 +1,11 @@
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from core.time_utils import get_current_time_context
 
 if TYPE_CHECKING:
     from memory.manager import MemoryManager
+
+from memory.schema import MemoryRecord, MemorySearchResult
 
 _BASE_SYSTEM_PROMPT = """\
 You are Jarvis, a personal AI assistant for Wess. You run locally on his Mac Mini and \
@@ -34,61 +37,110 @@ understand and can process German documents, emails, and messages.
 - Use create_task for backlog/todo tracking. Use schedule_message when Wess expects a Telegram message at a specific time. Use both only if he clearly wants both.
 - When Wess asks how the system works or why something failed, prefer read_source_file and read_logs so you can answer from first principles instead of guessing.
 - When Wess asks about GitHub pull requests or commits, prefer the dedicated GitHub read-only tools before speculating.
-
-Available tools:
-- create_github_issue(title, body?, labels?): create a GitHub issue in the configured repository. Prefer this for feature requests and backlog items.
-- list_pull_requests(state?, limit?): list pull requests from the configured GitHub repository. Read-only.
-- read_pull_request(number): read a pull request by number from the configured GitHub repository. Read-only.
-- list_commits(branch?, limit?): list recent commits from the configured GitHub repository. Read-only.
-- read_commit(sha): read a commit by SHA from the configured GitHub repository. Read-only.
-- read_source_file(path): read a project file from the Marvis codebase. Read-only and sandboxed to the project root.
-- read_logs(date_expression?, level?, limit?): read structured operational logs from local JSONL files. Read-only and useful for debugging failures.
-- schedule_message(message, when, recurrence?, task_id?, until_task_done?): schedule a proactive Telegram reminder. `when` accepts ISO datetimes or natural language like "today at 3pm" or "in 2 hours".
-- list_reminders(status?): list scheduled, cancelled, completed, or all reminders.
-- cancel_reminder(reminder_id): cancel a scheduled reminder using the ID from list_reminders.
-- remember(topic, summary, category, source, confidence): store or update a memory.
-- recall(query): semantic search over your memory store.
-- forget(topic): delete a memory by topic.
-- list_memories(category?): list all stored memories, optionally by category.
-- search_drive(query): search Google Drive for a file by name or content.
-- read_drive_file(file_id): download and read the contents of a Drive file. Use IDs from search_drive.
-- create_note(title, body?, folder?, tags?, note_type?, unique?): create a collaborative note in Obsidian.
-- append_note(path, content): append content to an existing collaborative note in Obsidian.
-- update_note(path, content?, find_text?, replace_with?, replace_all?, preserve_frontmatter?): modify an existing collaborative note in Obsidian.
-- search_notes(query, folder?, limit?): search collaborative notes stored in Obsidian.
-- read_note(path): read a collaborative note from Obsidian.
-- list_recent_notes(folder?, limit?): list recent collaborative notes from Obsidian.
-- check_calendar(date_expression?, start_date?, end_date?, max_results?): check calendar events. Prefer date_expression for relative dates like today or Monday.
-- create_event(title, when?, start?, end?, description?, location?): create a Google Calendar event. Prefer when for relative dates; use start/end only for explicit ISO datetimes.
-- create_task(description, due_date_expression?, due_date?): create a task/todo item. This does not send Telegram automatically. Only use when Wess explicitly asks for task tracking or a todo item.
-- list_tasks(status?): list pending, done, or all tasks. Use when Wess asks about his tasks or todos.
-- complete_task(task_id): mark a task as done. task_id can be the first 8 characters of the ID shown in list_tasks.
-- financial_summary(start_date?, end_date?, vendor?, category?): query financial records filed to Drive. Useful for spending summaries.
+- Use the provided tool schema as the source of truth for callable tools and their arguments.
 """
 
 _MEMORY_SECTION_HEADER = "\n\n---\nRelevant memories from your knowledge base:\n"
 _MEMORY_SECTION_FOOTER = "\n---\n"
+_MAX_RETRIEVED_MEMORIES = 8
+_DEFAULT_MEMORY_COUNT = 3
+_HIGH_SIMILARITY_MEMORY_COUNT = 5
+_HIGH_SIMILARITY_DISTANCE = 0.55
+_HIGH_SIMILARITY_MARGIN = 0.08
+_MEMORY_SUMMARY_CHARS = 120
+
+
+@dataclass(frozen=True)
+class PromptBuildResult:
+    prompt: str
+    candidate_count: int
+    memory_count: int
+    memory_chars: int
+    memory_topics: list[str]
+
+
+def _truncate_summary(text: str, max_chars: int = _MEMORY_SUMMARY_CHARS) -> str:
+    stripped = " ".join(str(text or "").split())
+    if len(stripped) <= max_chars:
+        return stripped
+    return stripped[: max_chars - 3].rstrip() + "..."
+
+
+def _should_include_document_ref(user_message: str) -> bool:
+    lowered = str(user_message or "").lower()
+    markers = (
+        "document",
+        "documents",
+        "drive",
+        "file",
+        "files",
+        "pdf",
+        "receipt",
+        "invoice",
+        "contract",
+        "ticket",
+        "booking",
+    )
+    return any(marker in lowered for marker in markers)
+
+
+def _select_prompt_memories(matches: list[MemorySearchResult]) -> list[MemoryRecord]:
+    if not matches:
+        return []
+
+    selected: list[MemoryRecord] = []
+    best_distance = next((match.distance for match in matches if match.distance is not None), None)
+    max_distance = None
+    if best_distance is not None:
+        max_distance = min(best_distance + _HIGH_SIMILARITY_MARGIN, _HIGH_SIMILARITY_DISTANCE)
+
+    for index, match in enumerate(matches):
+        if index < _DEFAULT_MEMORY_COUNT:
+            selected.append(match.record)
+            continue
+        if len(selected) >= _HIGH_SIMILARITY_MEMORY_COUNT:
+            break
+        if max_distance is not None and match.distance is not None and match.distance <= max_distance:
+            selected.append(match.record)
+    return selected
+
+
+def _format_memory_line(record: MemoryRecord, *, include_document_ref: bool) -> str:
+    line = f"[{record.category.value.upper()} | {record.topic}] {_truncate_summary(record.summary)}"
+    if include_document_ref and record.document_ref and record.category.value == "document_ref":
+        line += f" (Drive ID: {record.document_ref})"
+    return line
+
+
+def build_system_prompt_result(memory_manager: "MemoryManager", user_message: str) -> PromptBuildResult:
+    matches = memory_manager.search_scored(user_message, n_results=_MAX_RETRIEVED_MEMORIES)
+    memories = _select_prompt_memories(matches)
+    time_context = "\n\nTime context:\n- " + get_current_time_context() + "\n"
+    include_document_ref = _should_include_document_ref(user_message)
+
+    if not memories:
+        return PromptBuildResult(
+            prompt=_BASE_SYSTEM_PROMPT + time_context,
+            candidate_count=0,
+            memory_count=0,
+            memory_chars=0,
+            memory_topics=[],
+        )
+
+    memory_lines = [
+        _format_memory_line(memory, include_document_ref=include_document_ref)
+        for memory in memories
+    ]
+    memory_block = "\n".join(memory_lines)
+    return PromptBuildResult(
+        prompt=_BASE_SYSTEM_PROMPT + time_context + _MEMORY_SECTION_HEADER + memory_block + _MEMORY_SECTION_FOOTER,
+        candidate_count=len(matches),
+        memory_count=len(memories),
+        memory_chars=len(memory_block),
+        memory_topics=[memory.topic for memory in memories],
+    )
 
 
 def build_system_prompt(memory_manager: "MemoryManager", user_message: str) -> str:
-    """Build a system prompt with top-N semantically relevant memories injected."""
-    memories = memory_manager.search(user_message, n_results=8)
-    time_context = "\n\nTime context:\n- " + get_current_time_context() + "\n"
-
-    if not memories:
-        return _BASE_SYSTEM_PROMPT + time_context
-
-    memory_lines = []
-    for m in memories:
-        line = f"[{m.category.value.upper()} | {m.topic}] {m.summary}"
-        if m.document_ref:
-            line += f" (Drive ID: {m.document_ref})"
-        memory_lines.append(line)
-
-    return (
-        _BASE_SYSTEM_PROMPT
-        + time_context
-        + _MEMORY_SECTION_HEADER
-        + "\n".join(memory_lines)
-        + _MEMORY_SECTION_FOOTER
-    )
+    """Build a system prompt with a compact relevant memory section."""
+    return build_system_prompt_result(memory_manager, user_message).prompt

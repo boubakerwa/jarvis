@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 
 from config import settings
 from core.opslog import record_activity, record_issue
+from core.tracing import generation_cost_details, generation_usage_details, start_generation, start_trace, summarize_text
 
 logger = logging.getLogger(__name__)
 
@@ -31,16 +32,19 @@ DEFAULT_VOICE = "professional"
 
 VOICE_GUIDES: dict[str, str] = {
     "professional": "Crisp, credible, and useful for a broad professional audience.",
-    "operator": "Practical, informed, and slightly opinionated without sounding hypey.",
-    "founder": "Forward-looking and energetic, but still grounded in real implications.",
+    "operator": "Practical, informed, and opinionated for executives and operators making AI adoption decisions.",
+    "founder": "Forward-looking and energetic, but still grounded in operational implications.",
 }
 
 WRITER_CONTEXT = [
-    "Writer identity: the user is an independent LinkedIn creator building a personal brand.",
+    "Writer identity: the user is an independent LinkedIn creator building credibility as an AI reference for executive operators.",
     "Do not write as the source author or imply affiliation with the source account.",
     "Frame the source as something the user saw or read, then add the user's own take.",
     "Prefer framing like 'I came across this post' or 'What stood out to me' over source-centered phrasing.",
     "Keep the tone smart, practical, and personal without sounding self-important.",
+    "Optimize for LinkedIn-native reading: strong first line, short paragraphs, concrete implications, no hype.",
+    "Target length: 120-220 words unless the source requires a shorter take.",
+    "Audience: founders, executives, product leaders, and engineering leaders tracking cutting-edge AI.",
 ]
 
 REWRITE_PRESETS = [
@@ -157,24 +161,26 @@ def _build_library_tags(text: str, source_type: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 _DRAFT_SYSTEM_PROMPT = (
-    "You write polished LinkedIn posts from source material. Write as the user in first person "
-    "as an independent creator. The source is something the user read or saw, not something they "
-    "authored. Keep it specific, practical, and brand-building. Avoid hype, avoid corporate-speak, "
-    "and do not invent facts beyond the source text and provided media notes. Never imply the user "
-    "is the original source account or affiliated with it. Use natural wording like "
-    "'I came across a post from...' instead of awkward phrasing. Make every paragraph a complete "
-    "thought. Do not use placeholders like '(link)'. "
+    "You write polished LinkedIn-native posts from source material for an executive-operator "
+    "audience tracking cutting-edge AI. Write as the user in first person as an independent creator. "
+    "The source is something the user read or saw, not something they authored. Keep it specific, "
+    "practical, and brand-building. Avoid hype, engagement bait, corporate-speak, and invented facts. "
+    "Never imply the user is the original source account or affiliated with it. Use natural wording "
+    "like 'I came across a post from...' instead of awkward phrasing. The first line must create a "
+    "clear reason to keep reading. Body paragraphs should be short and should explain what the news "
+    "changes for teams, leaders, or operators. Do not use placeholders like '(link)'. "
     "Respond ONLY with a JSON object with these fields: "
     "headline (string), hook (string), bodyParagraphs (array of 2-4 strings), "
     "cta (string), hashtags (array of 2-5 strings)."
 )
 
 _REWRITE_SYSTEM_PROMPT = (
-    "You rewrite LinkedIn posts for a personal brand. Write as the user in first person as an "
-    "independent creator. The source is something the user saw or read, not something they authored. "
-    "Apply the rewrite instructions precisely, keep the draft specific and practical, and never imply "
-    "the user is the source account or affiliated with it. Avoid placeholders and make each paragraph "
-    "a complete thought. "
+    "You rewrite LinkedIn-native posts for a personal brand built around executive-grade AI judgment. "
+    "Write as the user in first person as an independent creator. The source is something the user "
+    "saw or read, not something they authored. Apply the rewrite instructions precisely, keep the "
+    "draft specific and practical, and never imply the user is the source account or affiliated with it. "
+    "Avoid placeholders, hype, engagement bait, and generic AI commentary. Make each paragraph a complete "
+    "thought and preserve a concrete operator takeaway. "
     "Respond ONLY with a JSON object with these fields: "
     "headline (string), hook (string), bodyParagraphs (array of 2-4 strings), "
     "cta (string), hashtags (array of 2-5 strings)."
@@ -185,13 +191,15 @@ def _build_model_prompt(source: dict, voice: str) -> str:
     media_notes = source.get("media_summary") or source.get("manual_media_notes") or "None"
     lines = list(WRITER_CONTEXT) + [
         "",
-        "Goal: write a LinkedIn post that helps the user build a thoughtful personal brand from a sourced insight.",
+        "Goal: write a LinkedIn post that helps the user become a trusted AI reference for executive operators from a sourced insight.",
         f"Voice: {voice}",
         f"Voice guide: {VOICE_GUIDES[voice]}",
         f"Source type: {source.get('type', 'manual')}",
         f"Author: {source.get('author_name') or source.get('author_handle') or 'Unknown'}",
         f"Media notes: {media_notes}",
         f"Source text:\n{source.get('text', '')}",
+        "Write 120-220 words, with short paragraphs and 2-4 specific hashtags.",
+        "If a source link is useful, imply that the source can be shared separately; do not paste raw URLs into the post body.",
     ]
     return "\n\n".join(lines)
 
@@ -199,7 +207,7 @@ def _build_model_prompt(source: dict, voice: str) -> str:
 def _build_rewrite_prompt(source: dict, current_draft: dict, voice: str, instructions: str) -> str:
     lines = list(WRITER_CONTEXT) + [
         "",
-        "Goal: rewrite an existing LinkedIn draft so it better fits the user's personal brand.",
+        "Goal: rewrite an existing LinkedIn draft so it better fits the user's AI-reference personal brand for executive operators.",
         f"Voice: {voice}",
         f"Voice guide: {VOICE_GUIDES[voice]}",
         f"Rewrite instructions: {instructions}",
@@ -212,6 +220,7 @@ def _build_rewrite_prompt(source: dict, current_draft: dict, voice: str, instruc
         "Write in first person as an independent creator reacting to something you came across.",
         "Do not impersonate or speak on behalf of the source account.",
         "Apply the rewrite instructions directly, not as meta commentary.",
+        "Keep it LinkedIn-native: 120-220 words, strong first line, short paragraphs, concrete operator implication.",
     ]
     return "\n\n".join(lines)
 
@@ -252,73 +261,96 @@ def _call_llm(prompt: str, system: str, task_name: str) -> dict:
     started = time.monotonic()
     started_at = datetime.now(timezone.utc).isoformat()
 
-    try:
-        response = call_with_free_model_retry(
-            lambda: client.messages.create(
-                model=model,
-                max_tokens=1024,
-                system=system,
-                messages=[{"role": "user", "content": prompt}],
-            ),
-            model,
-        )
-    except Exception as exc:
-        record_llm_call(
-            task=task_name,
-            model=model,
-            status="api_error",
-            started_at=started_at,
-            latency_ms=(time.monotonic() - started) * 1000,
-            error=str(exc),
-        )
-        raise RuntimeError(f"LLM call failed for {task_name}: {exc}") from exc
-
-    stop_reason = getattr(response, "stop_reason", None)
-    text = "".join(
-        getattr(b, "text", "")
-        for b in getattr(response, "content", [])
-        if getattr(b, "type", None) == "text"
-    )
-    # Strip markdown fences
-    text = re.sub(r"```(?:json)?\s*", "", text)
-    text = re.sub(r"```", "", text).strip()
-
-    if not text:
-        # Log the raw response so we can see what actually came back
-        raw_content = getattr(response, "content", [])
-        logger.warning(
-            "LLM returned empty text for %s (stop_reason=%r, content_blocks=%d, raw=%r)",
-            task_name, stop_reason, len(raw_content), raw_content,
-        )
-        record_llm_call(
-            task=task_name,
-            model=model,
-            status="empty_response",
-            started_at=started_at,
-            latency_ms=(time.monotonic() - started) * 1000,
-            error=f"Empty text response (stop_reason={stop_reason})",
-        )
-        raise RuntimeError(
-            f"LLM returned empty response for {task_name} (stop_reason={stop_reason}). "
-            "The model may have refused or been truncated."
-        )
-
-    record_llm_call(
-        task=task_name,
+    with start_generation(
+        name=task_name,
+        input={"prompt": summarize_text(prompt, label="linkedin-prompt"), "system_chars": len(system)},
+        metadata={"task": task_name},
         model=model,
-        status="ok",
-        started_at=started_at,
-        latency_ms=(time.monotonic() - started) * 1000,
-    )
+        model_parameters={"max_tokens": 1024},
+    ) as generation:
+        try:
+            response = call_with_free_model_retry(
+                lambda: client.messages.create(
+                    model=model,
+                    max_tokens=1024,
+                    system=system,
+                    messages=[{"role": "user", "content": prompt}],
+                ),
+                model,
+            )
+        except Exception as exc:
+            record_llm_call(
+                task=task_name,
+                model=model,
+                status="api_error",
+                started_at=started_at,
+                latency_ms=(time.monotonic() - started) * 1000,
+                error=str(exc),
+            )
+            generation.update(metadata={"task": task_name, "status": "api_error"}, status_message=str(exc))
+            raise RuntimeError(f"LLM call failed for {task_name}: {exc}") from exc
 
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError as exc:
-        logger.warning(
-            "LLM returned invalid JSON for %s (stop_reason=%r): %r",
-            task_name, stop_reason, text[:500],
+        stop_reason = getattr(response, "stop_reason", None)
+        text = "".join(
+            getattr(b, "text", "")
+            for b in getattr(response, "content", [])
+            if getattr(b, "type", None) == "text"
         )
-        raise RuntimeError(f"LLM returned invalid JSON for {task_name}: {exc}") from exc
+        # Strip markdown fences
+        text = re.sub(r"```(?:json)?\s*", "", text)
+        text = re.sub(r"```", "", text).strip()
+
+        if not text:
+            # Log the raw response so we can see what actually came back
+            raw_content = getattr(response, "content", [])
+            logger.warning(
+                "LLM returned empty text for %s (stop_reason=%r, content_blocks=%d, raw=%r)",
+                task_name, stop_reason, len(raw_content), raw_content,
+            )
+            record_llm_call(
+                task=task_name,
+                model=model,
+                status="empty_response",
+                started_at=started_at,
+                latency_ms=(time.monotonic() - started) * 1000,
+                response=response,
+                error=f"Empty text response (stop_reason={stop_reason})",
+            )
+            generation.update(
+                metadata={"task": task_name, "status": "empty_response"},
+                usage_details=generation_usage_details(response),
+                cost_details=generation_cost_details(model, response),
+                status_message=f"Empty text response (stop_reason={stop_reason})",
+            )
+            raise RuntimeError(
+                f"LLM returned empty response for {task_name} (stop_reason={stop_reason}). "
+                "The model may have refused or been truncated."
+            )
+
+        record_llm_call(
+            task=task_name,
+            model=model,
+            status="ok",
+            started_at=started_at,
+            latency_ms=(time.monotonic() - started) * 1000,
+            response=response,
+            metadata={"stop_reason": stop_reason or "", "raw_output_chars": len(text)},
+        )
+        generation.update(
+            output=text,
+            metadata={"task": task_name, "stop_reason": stop_reason or "", "raw_output_chars": len(text)},
+            usage_details=generation_usage_details(response),
+            cost_details=generation_cost_details(model, response),
+        )
+
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as exc:
+            logger.warning(
+                "LLM returned invalid JSON for %s (stop_reason=%r): %r",
+                task_name, stop_reason, text[:500],
+            )
+            raise RuntimeError(f"LLM returned invalid JSON for {task_name}: {exc}") from exc
 
 
 def _parse_draft_response(raw: dict, source: dict, mode: str) -> dict:
@@ -463,14 +495,26 @@ def generate_draft(row: dict, parent_draft: dict | None = None) -> dict:
 
     is_rewrite = bool(rewrite_of and (rewrite_instructions or preset_id))
 
-    if is_rewrite and parent_draft:
-        prompt = _build_rewrite_prompt(source, parent_draft, voice, rewrite_instructions)
-        raw = _call_llm(prompt, _REWRITE_SYSTEM_PROMPT, "linkedin_rewrite")
-        draft = _parse_draft_response(raw, source, "model-rewrite")
-    else:
-        prompt = _build_model_prompt(source, voice)
-        raw = _call_llm(prompt, _DRAFT_SYSTEM_PROMPT, "linkedin_draft")
-        draft = _parse_draft_response(raw, source, "model")
+    with start_trace(
+        name="linkedin-draft",
+        session_id="linkedin",
+        input={"source": summarize_text(source_text, label="linkedin-source")},
+        metadata={
+            "task": "linkedin_rewrite" if is_rewrite else "linkedin_draft",
+            "draft_id": row.get("id", "")[:8],
+            "voice": voice,
+            "rewrite": is_rewrite,
+        },
+        tags=["linkedin"],
+    ):
+        if is_rewrite and parent_draft:
+            prompt = _build_rewrite_prompt(source, parent_draft, voice, rewrite_instructions)
+            raw = _call_llm(prompt, _REWRITE_SYSTEM_PROMPT, "linkedin_rewrite")
+            draft = _parse_draft_response(raw, source, "model-rewrite")
+        else:
+            prompt = _build_model_prompt(source, voice)
+            raw = _call_llm(prompt, _DRAFT_SYSTEM_PROMPT, "linkedin_draft")
+            draft = _parse_draft_response(raw, source, "model")
 
     record_activity(
         event="linkedin_draft_generated",
@@ -496,27 +540,27 @@ def format_queued_for_telegram(row: dict) -> str:
 
 
 def format_ready_for_telegram(row: dict, draft: dict) -> str:
-    """Full post notification sent when processing completes."""
+    """Completion notification sent when processing completes."""
     draft_id = row.get("id", "")[:8]
     voice = row.get("voice", DEFAULT_VOICE)
     pillar = row.get("pillar_label", "")
     generation_mode = draft.get("generation", {}).get("mode", "")
     source_author = row.get("source_author", "")
-    drive_filename = row.get("drive_filename", "")
+    obsidian_filename = row.get("obsidian_filename", "")
+    obsidian_path = row.get("obsidian_path", "")
     headline = draft.get("headline", "Untitled")
-    full_post = draft.get("fullPost", "")
 
     lines = [
-        f"✅ *{headline}*",
+        f"✅ *LinkedIn draft ready* · `{draft_id}`",
+        f"{headline}",
         f"_Voice: {voice} · Pillar: {pillar} · Mode: {generation_mode}_",
     ]
     if source_author:
         lines.append(f"_Source: {source_author}_")
-    lines.append("")
-    lines.append(full_post)
-    lines.append("")
-    if drive_filename:
-        lines.append(f"_Saved as `{drive_filename}` in Drive_")
+    if obsidian_filename:
+        lines.append(f"_Saved as `{obsidian_filename}` in Obsidian_")
+    elif obsidian_path:
+        lines.append(f"_Saved at `{obsidian_path}`_")
     lines.append(f"_Draft ID: `{draft_id}`_")
     return "\n".join(lines)
 

@@ -1,3 +1,3 @@
-from .service import ReminderDeliveryRunner, ReminderManager
+from .service import ChatResetSessionManager, ReminderDeliveryRunner, ReminderManager
 
-__all__ = ["ReminderDeliveryRunner", "ReminderManager"]
+__all__ = ["ReminderDeliveryRunner", "ReminderManager", "ChatResetSessionManager"]

@@ -625,6 +625,12 @@ class DashboardTests(unittest.TestCase):
         self.assertIn('source.split("\\n")', html)
         self.assertIn('trimmed.match(/^(#{1,6})\\s+(.*)$/)', html)
         self.assertIn('data-linkedin-save', html)
+        self.assertIn("Publishing Calendar", html)
+        self.assertIn("Tuesday and Thursday at 09:00 Europe/Berlin", html)
+        self.assertIn("Open slot", html)
+        self.assertIn("Schedule", html)
+        self.assertIn("Mark published", html)
+        self.assertNotIn("Gmail state", html)
         self.assertIn('void openLinkedInDraft(linkedinState.selectedDraftId, true);', html)
 
     def test_linkedin_editor_payload_and_save_round_trip_note(self):
@@ -847,6 +853,96 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(payload["status"], "ready")
         self.assertEqual(payload["detail"], "Post re-triggered and saved to Obsidian.")
         self.assertIn("Actual generated post body.", payload["content"])
+
+    def test_linkedin_schedule_source_publish_actions_update_editor_payload(self):
+        with TemporaryDirectory() as td:
+            temp_root = Path(td)
+            (temp_root / "logs").mkdir()
+            (temp_root / "data").mkdir()
+            (temp_root / "vault" / "LinkedIn" / "2026-05").mkdir(parents=True)
+            (temp_root / "logs" / "jarvis.log").write_text(
+                "2026-04-05 15:03:00 [INFO] telegram.ext.Application: Application started"
+            )
+            db_path = temp_root / "data" / "jarvis_memory.db"
+            create_memory_db(db_path)
+            note_path = "LinkedIn/2026-05/test-post.md"
+            (temp_root / "vault" / note_path).write_text("# Test Post\n\nBody.\n", encoding="utf-8")
+            insert_linkedin_draft(
+                db_path,
+                draft_id="draft-12345678",
+                obsidian_path=note_path,
+                obsidian_filename="test-post",
+            )
+
+            module = load_module("tested_dashboard_linkedin_actions", "dashboard/app.py")
+            configure_dashboard_module(module, temp_root)
+
+            scheduled, scheduled_status = module._schedule_linkedin_draft(
+                "draft-12",
+                {"scheduledFor": "2026-05-14T09:00:00+02:00"},
+            )
+            sourced, sourced_status = module._source_linkedin_draft(
+                "draft-12",
+                {"verifiedSourceUrl": "https://arxiv.org/abs/1234.5678", "linkPolicy": "first_comment"},
+            )
+            with mock.patch(
+                "linkedin.editorial.score_draft",
+                return_value={
+                    "total": 87,
+                    "source_credibility": 23,
+                    "novelty_timeliness": 17,
+                    "executive_relevance": 18,
+                    "differentiated_pov": 17,
+                    "clarity_linkedin_fit": 12,
+                    "strengths": ["clear"],
+                    "risks": [],
+                    "recommendation": "publish",
+                },
+            ):
+                scored, scored_status = module._score_linkedin_draft("draft-12")
+            published, published_status = module._publish_linkedin_draft(
+                "draft-12",
+                {"linkedinUrl": "https://www.linkedin.com/posts/example"},
+            )
+
+        self.assertEqual(scheduled_status, 200)
+        self.assertEqual(scheduled["publishStatus"], "scheduled")
+        self.assertEqual(scheduled["scheduledFor"], "2026-05-14T07:00:00+00:00")
+        self.assertEqual(sourced_status, 200)
+        self.assertEqual(sourced["verifiedSourceUrl"], "https://arxiv.org/abs/1234.5678")
+        self.assertEqual(scored_status, 200)
+        self.assertEqual(scored["scoreTotal"], 87)
+        self.assertEqual(published_status, 200)
+        self.assertEqual(published["publishStatus"], "published")
+        self.assertEqual(published["linkedinUrl"], "https://www.linkedin.com/posts/example")
+
+    def test_linkedin_calendar_payload_lists_scheduled_and_overdue(self):
+        with TemporaryDirectory() as td:
+            temp_root = Path(td)
+            (temp_root / "logs").mkdir()
+            (temp_root / "data").mkdir()
+            (temp_root / "vault").mkdir()
+            (temp_root / "logs" / "jarvis.log").write_text(
+                "2026-04-05 15:03:00 [INFO] telegram.ext.Application: Application started"
+            )
+            db_path = temp_root / "data" / "jarvis_memory.db"
+            create_memory_db(db_path)
+            insert_linkedin_draft(
+                db_path,
+                draft_id="draft-12345678",
+                obsidian_path="LinkedIn/2026-05/test-post.md",
+                obsidian_filename="test-post",
+            )
+
+            module = load_module("tested_dashboard_linkedin_calendar", "dashboard/app.py")
+            configure_dashboard_module(module, temp_root)
+            module._schedule_linkedin_draft("draft-12", {"scheduledFor": "2026-05-12T07:00:00+00:00"})
+            payload, status_code = module._linkedin_calendar_payload()
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(len(payload["scheduled"]), 1)
+        self.assertTrue(payload["nextSlots"])
+        self.assertIn("scheduledForLocal", payload["scheduled"][0])
 
 
 if __name__ == "__main__":

@@ -33,22 +33,13 @@ FILENAME_PATTERN_DESCRIPTION = (
 
 # Classification prompt template for the Agent SDK filer
 CLASSIFICATION_PROMPT = """\
-You are a document classifier. You will be given a file and must determine where it \
-belongs in a structured Google Drive library.
-
-Documents may be in English or German. Classify them correctly regardless of language. \
-Common German document terms: Rechnung (invoice), Vertrag (contract), \
-Versicherung (insurance), Krankenversicherung (health insurance), \
-Mietvertrag (rental agreement), Steuerbescheid (tax notice), \
-Kontoauszug (bank statement), Bescheinigung (certificate), \
-Kfz (vehicle), Mahnung (reminder/dunning notice), Quittung (receipt). \
-Always respond in English.
+Classify this document into the structured Google Drive library.
+Documents may be in English or German. Always respond in English.
 
 Top-level folders (you MUST pick one of these exactly):
 {top_level_folders}
 
-Sub-folders within each top-level folder are suggestions. You may create a new sub-folder \
-if none of the defaults fits — use clear, consistent naming (title case, no special chars).
+Sub-folders are suggestions. You may create a better one if needed. Use clear title case.
 
 Respond ONLY with a JSON object with these fields:
 - top_level: string — one of the top-level folder names above (exact match required)
@@ -67,7 +58,7 @@ Example response:
 File to classify:
 - Original filename: {{original_filename}}
 - MIME type: {{mime_type}}
-- Extracted text (first 2000 chars):
+- Extracted text (first 1000 chars):
 {{text_preview}}
 """
 
@@ -79,4 +70,4 @@ def build_classification_prompt(original_filename: str, mime_type: str, text_pre
         filename_pattern=FILENAME_PATTERN_DESCRIPTION,
     ).replace("{original_filename}", original_filename).replace(
         "{mime_type}", mime_type
-    ).replace("{text_preview}", text_preview[:2000])
+    ).replace("{text_preview}", text_preview[:1000])

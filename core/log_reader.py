@@ -60,7 +60,7 @@ def read_logs(
     *,
     date_expression: str | None = None,
     level: str | None = None,
-    limit: int = 20,
+    limit: int = 10,
 ) -> list[dict[str, Any]]:
     normalized_level = _normalize_level(level)
     capped_limit = max(1, min(int(limit or 20), 200))

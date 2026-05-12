@@ -29,6 +29,23 @@ class FakeGitHubClient:
             },
         )()
 
+    def list_issues(self, *, state, limit):
+        return [
+            type(
+                "Issue",
+                (),
+                {
+                    "number": 7,
+                    "title": "Triage Gmail action extraction",
+                    "state": state,
+                    "labels": ("feature",),
+                    "assignees": ("wess",),
+                    "updated_at": "2026-04-10T09:00:00Z",
+                    "url": "https://github.com/owner/repo/issues/7",
+                },
+            )()
+        ]
+
     def list_pull_requests(self, *, state, limit):
         return [
             type(
@@ -113,6 +130,16 @@ class AgentGitHubToolTests(unittest.TestCase):
 
         self.assertIn("PR #10", response)
         self.assertIn("codex/reminders -> main", response)
+
+    def test_list_github_issues_formats_response(self):
+        agent = self.module.JarvisAgent.__new__(self.module.JarvisAgent)
+        agent._github_client = lambda: FakeGitHubClient()
+
+        response = agent._tool_list_github_issues({"state": "open", "limit": 5})
+
+        self.assertIn("Issue #7", response)
+        self.assertIn("[feature]", response)
+        self.assertIn("assigned to wess", response)
 
     def test_read_pull_request_formats_stats_and_body(self):
         agent = self.module.JarvisAgent.__new__(self.module.JarvisAgent)
