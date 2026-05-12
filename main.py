@@ -570,6 +570,7 @@ def main():
     # LinkedIn processor cron (every 15 minutes)
     def _linkedin_cron_loop() -> None:
         import time as _time
+        from linkedin.editorial import process_publish_reminders
         from linkedin.processor import process_pending_drafts
         _INTERVAL = 15 * 60
         logger.info("LinkedIn processor cron started (interval: %ds)", _INTERVAL)
@@ -577,6 +578,7 @@ def main():
             _time.sleep(_INTERVAL)
             try:
                 process_pending_drafts(notes_manager, notifier=proactive_notifier)
+                process_publish_reminders(proactive_notifier)
             except Exception as _exc:
                 logger.exception("LinkedIn processor cron error: %s", _exc)
 

@@ -32,16 +32,19 @@ DEFAULT_VOICE = "professional"
 
 VOICE_GUIDES: dict[str, str] = {
     "professional": "Crisp, credible, and useful for a broad professional audience.",
-    "operator": "Practical, informed, and slightly opinionated without sounding hypey.",
-    "founder": "Forward-looking and energetic, but still grounded in real implications.",
+    "operator": "Practical, informed, and opinionated for executives and operators making AI adoption decisions.",
+    "founder": "Forward-looking and energetic, but still grounded in operational implications.",
 }
 
 WRITER_CONTEXT = [
-    "Writer identity: the user is an independent LinkedIn creator building a personal brand.",
+    "Writer identity: the user is an independent LinkedIn creator building credibility as an AI reference for executive operators.",
     "Do not write as the source author or imply affiliation with the source account.",
     "Frame the source as something the user saw or read, then add the user's own take.",
     "Prefer framing like 'I came across this post' or 'What stood out to me' over source-centered phrasing.",
     "Keep the tone smart, practical, and personal without sounding self-important.",
+    "Optimize for LinkedIn-native reading: strong first line, short paragraphs, concrete implications, no hype.",
+    "Target length: 120-220 words unless the source requires a shorter take.",
+    "Audience: founders, executives, product leaders, and engineering leaders tracking cutting-edge AI.",
 ]
 
 REWRITE_PRESETS = [
@@ -158,24 +161,26 @@ def _build_library_tags(text: str, source_type: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 _DRAFT_SYSTEM_PROMPT = (
-    "You write polished LinkedIn posts from source material. Write as the user in first person "
-    "as an independent creator. The source is something the user read or saw, not something they "
-    "authored. Keep it specific, practical, and brand-building. Avoid hype, avoid corporate-speak, "
-    "and do not invent facts beyond the source text and provided media notes. Never imply the user "
-    "is the original source account or affiliated with it. Use natural wording like "
-    "'I came across a post from...' instead of awkward phrasing. Make every paragraph a complete "
-    "thought. Do not use placeholders like '(link)'. "
+    "You write polished LinkedIn-native posts from source material for an executive-operator "
+    "audience tracking cutting-edge AI. Write as the user in first person as an independent creator. "
+    "The source is something the user read or saw, not something they authored. Keep it specific, "
+    "practical, and brand-building. Avoid hype, engagement bait, corporate-speak, and invented facts. "
+    "Never imply the user is the original source account or affiliated with it. Use natural wording "
+    "like 'I came across a post from...' instead of awkward phrasing. The first line must create a "
+    "clear reason to keep reading. Body paragraphs should be short and should explain what the news "
+    "changes for teams, leaders, or operators. Do not use placeholders like '(link)'. "
     "Respond ONLY with a JSON object with these fields: "
     "headline (string), hook (string), bodyParagraphs (array of 2-4 strings), "
     "cta (string), hashtags (array of 2-5 strings)."
 )
 
 _REWRITE_SYSTEM_PROMPT = (
-    "You rewrite LinkedIn posts for a personal brand. Write as the user in first person as an "
-    "independent creator. The source is something the user saw or read, not something they authored. "
-    "Apply the rewrite instructions precisely, keep the draft specific and practical, and never imply "
-    "the user is the source account or affiliated with it. Avoid placeholders and make each paragraph "
-    "a complete thought. "
+    "You rewrite LinkedIn-native posts for a personal brand built around executive-grade AI judgment. "
+    "Write as the user in first person as an independent creator. The source is something the user "
+    "saw or read, not something they authored. Apply the rewrite instructions precisely, keep the "
+    "draft specific and practical, and never imply the user is the source account or affiliated with it. "
+    "Avoid placeholders, hype, engagement bait, and generic AI commentary. Make each paragraph a complete "
+    "thought and preserve a concrete operator takeaway. "
     "Respond ONLY with a JSON object with these fields: "
     "headline (string), hook (string), bodyParagraphs (array of 2-4 strings), "
     "cta (string), hashtags (array of 2-5 strings)."
@@ -186,13 +191,15 @@ def _build_model_prompt(source: dict, voice: str) -> str:
     media_notes = source.get("media_summary") or source.get("manual_media_notes") or "None"
     lines = list(WRITER_CONTEXT) + [
         "",
-        "Goal: write a LinkedIn post that helps the user build a thoughtful personal brand from a sourced insight.",
+        "Goal: write a LinkedIn post that helps the user become a trusted AI reference for executive operators from a sourced insight.",
         f"Voice: {voice}",
         f"Voice guide: {VOICE_GUIDES[voice]}",
         f"Source type: {source.get('type', 'manual')}",
         f"Author: {source.get('author_name') or source.get('author_handle') or 'Unknown'}",
         f"Media notes: {media_notes}",
         f"Source text:\n{source.get('text', '')}",
+        "Write 120-220 words, with short paragraphs and 2-4 specific hashtags.",
+        "If a source link is useful, imply that the source can be shared separately; do not paste raw URLs into the post body.",
     ]
     return "\n\n".join(lines)
 
@@ -200,7 +207,7 @@ def _build_model_prompt(source: dict, voice: str) -> str:
 def _build_rewrite_prompt(source: dict, current_draft: dict, voice: str, instructions: str) -> str:
     lines = list(WRITER_CONTEXT) + [
         "",
-        "Goal: rewrite an existing LinkedIn draft so it better fits the user's personal brand.",
+        "Goal: rewrite an existing LinkedIn draft so it better fits the user's AI-reference personal brand for executive operators.",
         f"Voice: {voice}",
         f"Voice guide: {VOICE_GUIDES[voice]}",
         f"Rewrite instructions: {instructions}",
@@ -213,6 +220,7 @@ def _build_rewrite_prompt(source: dict, current_draft: dict, voice: str, instruc
         "Write in first person as an independent creator reacting to something you came across.",
         "Do not impersonate or speak on behalf of the source account.",
         "Apply the rewrite instructions directly, not as meta commentary.",
+        "Keep it LinkedIn-native: 120-220 words, strong first line, short paragraphs, concrete operator implication.",
     ]
     return "\n\n".join(lines)
 
