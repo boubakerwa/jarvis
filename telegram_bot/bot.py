@@ -132,7 +132,18 @@ class TelegramProactiveNotifier:
 
 
 class TelegramBot:
-    def __init__(self, agent, memory_manager, drive_client=None, calendar_client=None, notes_manager=None, reminder_manager=None, chat_reset_manager=None, linkedin_drive=None):
+    def __init__(
+        self,
+        agent,
+        memory_manager,
+        drive_client=None,
+        calendar_client=None,
+        notes_manager=None,
+        reminder_manager=None,
+        chat_reset_manager=None,
+        linkedin_drive=None,
+        gmail_action_manager=None,
+    ):
         self._agent = agent
         self._memory = memory_manager
         self._drive = drive_client
@@ -140,6 +151,7 @@ class TelegramBot:
         self._notes = notes_manager
         self._reminders = reminder_manager
         self._chat_reset = chat_reset_manager
+        self._gmail_actions = gmail_action_manager
         self._background_tasks: set[asyncio.Task] = set()
         self._app = (
             Application.builder()
@@ -168,7 +180,7 @@ class TelegramBot:
         self._app.add_handler(CommandHandler("status", self._cmd_status, filters=allow))
         self._app.add_handler(CommandHandler("llmops", self._cmd_llmops, filters=allow))
         self._app.add_handler(CommandHandler("linkedin", self._cmd_linkedin, filters=allow))
-        self._app.add_handler(CallbackQueryHandler(self._handle_callback_query, pattern=r"^(reminder|chatreset):"))
+        self._app.add_handler(CallbackQueryHandler(self._handle_callback_query, pattern=r"^(reminder|chatreset|gmailaction):"))
 
         # File/photo uploads
         self._app.add_handler(
@@ -741,6 +753,9 @@ class TelegramBot:
             if prefix == "chatreset":
                 await self._handle_chat_reset_callback(query, action, target_id)
                 return
+            if prefix == "gmailaction":
+                await self._handle_gmail_action_callback(query, action, target_id)
+                return
             else:
                 await query.edit_message_text("This reminder action is no longer available.")
                 return
@@ -806,6 +821,44 @@ class TelegramBot:
             component="telegram",
             summary="Handled chat-reset reminder action without agent invocation",
             metadata={"action": action, "session_id": session["id"]},
+        )
+
+    async def _handle_gmail_action_callback(self, query, action: str, proposal_id: str) -> None:
+        if not action or not proposal_id or not self._gmail_actions:
+            await query.edit_message_text("This Gmail action proposal is no longer available.")
+            return
+
+        existing = self._gmail_actions.get_proposal(proposal_id)
+        if existing is None:
+            await query.edit_message_text("This Gmail action proposal is no longer available.")
+            return
+        if existing.get("status") != "pending":
+            await query.edit_message_text("This Gmail action proposal was already handled.")
+            return
+
+        if action == "confirm":
+            from gmail.action_store import format_commit_result
+
+            proposal, results = self._gmail_actions.commit_proposal(proposal_id)
+            if proposal is None:
+                await query.edit_message_text("This Gmail action proposal is no longer available.")
+                return
+            await query.edit_message_text(format_commit_result(results))
+        elif action == "dismiss":
+            proposal = self._gmail_actions.dismiss_proposal(proposal_id)
+            if proposal is None:
+                await query.edit_message_text("This Gmail action proposal is no longer available.")
+                return
+            await query.edit_message_text("Gmail action proposal dismissed. No changes made.")
+        else:
+            await query.edit_message_text("This Gmail action is no longer available.")
+            return
+
+        record_activity(
+            event="telegram_gmail_action_callback_handled",
+            component="telegram",
+            summary="Handled Gmail action proposal callback",
+            metadata={"action": action, "proposal_id": proposal_id},
         )
 
     def _describe_follow_up(self, reminder: dict) -> str:

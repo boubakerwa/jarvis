@@ -518,6 +518,18 @@ def main():
     logger.info("Agent initialised")
     record_audit(event="agent_ready", component="agent", summary="Agent initialised")
 
+    from gmail.action_store import GmailActionManager
+    gmail_action_manager = GmailActionManager(
+        memory_manager=memory_manager,
+        calendar_client=calendar_client,
+        reminder_manager=reminder_manager,
+    )
+    record_audit(
+        event="gmail_action_manager_ready",
+        component="gmail",
+        summary="Gmail action proposal manager initialised",
+    )
+
     heartbeat_thread = threading.Thread(target=_heartbeat_loop, daemon=True, name="ops-heartbeat")
     heartbeat_thread.start()
     record_activity(event="app_heartbeat_started", component="runtime", summary="Heartbeat thread started")
@@ -531,6 +543,7 @@ def main():
         notes_manager=notes_manager,
         reminder_manager=reminder_manager,
         chat_reset_manager=chat_reset_manager,
+        gmail_action_manager=gmail_action_manager,
     )
     proactive_notifier = TelegramProactiveNotifier(
         enabled=True,
@@ -580,7 +593,12 @@ def main():
     # Morning digest (daily scheduled message)
     if settings.JARVIS_MORNING_DIGEST_ENABLED:
         from morning_digest import MorningDigestRunner
-        morning_runner = MorningDigestRunner(notifier=proactive_notifier)
+        morning_runner = MorningDigestRunner(
+            notifier=proactive_notifier,
+            memory_manager=memory_manager,
+            reminder_manager=reminder_manager,
+            calendar_client=calendar_client,
+        )
         morning_thread = threading.Thread(
             target=morning_runner.run_forever, daemon=True, name="morning-digest"
         )
@@ -602,6 +620,28 @@ def main():
     def email_callback(email):
         try:
             result = _handle_email(email, memory_manager, drive_client)
+            try:
+                from gmail.action_extractor import extract_email_actions
+                from gmail.action_store import build_gmail_action_reply_markup, format_gmail_action_card
+
+                proposal = extract_email_actions(email)
+                if proposal:
+                    stored = gmail_action_manager.store_proposal(proposal)
+                    if settings.TELEGRAM_GMAIL_ACTION_NOTIFICATIONS:
+                        proactive_notifier.send_message(
+                            format_gmail_action_card(stored),
+                            reply_markup=build_gmail_action_reply_markup(stored["id"]),
+                        )
+            except Exception as action_exc:
+                logger.exception("Gmail action proposal stage failed")
+                record_issue(
+                    level="ERROR",
+                    event="gmail_action_stage_failed",
+                    component="gmail",
+                    status="error",
+                    summary="Gmail action proposal stage failed after email processing",
+                    metadata={"message_id": email.message_id, "error": str(action_exc)[:300]},
+                )
             _email_results.append((email, result, None))
         except Exception as exc:
             _email_results.append((email, None, exc))

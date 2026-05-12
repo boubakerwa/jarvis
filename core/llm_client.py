@@ -14,10 +14,12 @@ from config import settings
 
 
 _TASK_MODELS = {
-    "relevance": settings.OPENROUTER_MODEL_RELEVANCE,
-    "financial": settings.OPENROUTER_MODEL_FINANCIAL,
-    "classification": settings.OPENROUTER_MODEL_CLASSIFICATION,
-    "vision": settings.OPENROUTER_MODEL_VISION,
+    "relevance": getattr(settings, "OPENROUTER_MODEL_RELEVANCE", None),
+    "financial": getattr(settings, "OPENROUTER_MODEL_FINANCIAL", None),
+    "classification": getattr(settings, "OPENROUTER_MODEL_CLASSIFICATION", None),
+    "vision": getattr(settings, "OPENROUTER_MODEL_VISION", None),
+    "digest": getattr(settings, "OPENROUTER_MODEL_DIGEST", None),
+    "gmail_actions": getattr(settings, "OPENROUTER_MODEL_GMAIL_ACTIONS", None),
 }
 
 

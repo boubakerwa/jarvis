@@ -64,6 +64,25 @@ TOOLS: list[dict] = [
         },
     },
     {
+        "name": "list_github_issues",
+        "description": "List issues from the configured GitHub repository. Read-only.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "state": {
+                    "type": "string",
+                    "enum": ["open", "closed", "all"],
+                    "default": "open",
+                },
+                "limit": {
+                    "type": "integer",
+                    "default": 5,
+                    "description": "Maximum number of issues to return.",
+                },
+            },
+        },
+    },
+    {
         "name": "list_pull_requests",
         "description": "List pull requests from the configured GitHub repository. Read-only.",
         "input_schema": {
@@ -564,6 +583,7 @@ TOOLS: list[dict] = [
 
 _GITHUB_TOOL_NAMES = {
     "create_github_issue",
+    "list_github_issues",
     "list_pull_requests",
     "read_pull_request",
     "list_commits",
@@ -582,6 +602,7 @@ _REMINDER_TOOL_NAMES = {"schedule_message", "list_reminders", "cancel_reminder"}
 _DRIVE_TOOL_NAMES = {"search_drive", "read_drive_file"}
 _TOOL_DESCRIPTION_OVERRIDES: dict[str, str] = {
     "create_github_issue": "Create a GitHub issue in the configured repository.",
+    "list_github_issues": "List issues from the configured repository.",
     "list_pull_requests": "List pull requests from the configured repository.",
     "read_pull_request": "Read one pull request by number.",
     "list_commits": "List recent commits from the configured repository.",
@@ -918,6 +939,8 @@ class JarvisAgent:
         try:
             if name == "create_github_issue":
                 return self._tool_create_github_issue(inputs)
+            elif name == "list_github_issues":
+                return self._tool_list_github_issues(inputs)
             elif name == "list_pull_requests":
                 return self._tool_list_pull_requests(inputs)
             elif name == "read_pull_request":
@@ -1036,6 +1059,31 @@ class JarvisAgent:
         if issue.labels:
             labels_text = f" [labels: {', '.join(issue.labels)}]"
         return f"Created GitHub issue #{issue.number}: {issue.title}{labels_text}\n{issue.url}"
+
+    def _tool_list_github_issues(self, inputs: dict) -> str:
+        try:
+            client = self._github_client()
+            issues = client.list_issues(
+                state=inputs.get("state", "open"),
+                limit=inputs.get("limit", 5),
+            )
+        except (GitHubConfigError, GitHubAPIError) as e:
+            return f"Could not read GitHub issues: {e}"
+
+        if not issues:
+            return "No GitHub issues found."
+
+        lines = []
+        for issue in issues:
+            label_str = f" [{', '.join(issue.labels)}]" if issue.labels else ""
+            assignee_str = f" assigned to {', '.join(issue.assignees)}" if issue.assignees else ""
+            line = f"- Issue #{issue.number} [{issue.state}] {issue.title}{label_str}{assignee_str}"
+            if issue.updated_at:
+                line += f"\n  Updated: {issue.updated_at}"
+            if issue.url:
+                line += f"\n  {issue.url}"
+            lines.append(line)
+        return "\n".join(lines)
 
     def _tool_list_pull_requests(self, inputs: dict) -> str:
         try:
