@@ -175,6 +175,24 @@ class FakeChatResetManager:
         return {"id": session_id or "chatreset-1234"}
 
 
+class FakeDailyPlanner:
+    def __init__(self, handled=True):
+        self.handled = handled
+        self.calls = []
+        self.started = []
+
+    def handle_user_message(self, text):
+        self.calls.append(text)
+        return SimpleNamespace(handled=self.handled, text="Planner handled this.")
+
+    def start_today_session(self):
+        self.started.append(True)
+        return {"id": "planner-1234"}
+
+    def build_prompt(self):
+        return "Planning prompt"
+
+
 class FakeCallbackQuery:
     def __init__(self, data):
         self.data = data
@@ -217,7 +235,7 @@ class TelegramBotTests(unittest.TestCase):
 
         self.assertEqual(len(app.bot.calls), 2)
         command_names = [command.command for command in app.bot.calls[0][0]]
-        self.assertEqual(command_names, ["status", "llmops", "memories", "reminders", "forget", "reset", "linkedin"])
+        self.assertEqual(command_names, ["status", "llmops", "memories", "reminders", "forget", "reset", "linkedin", "plan"])
         self.assertIsNone(app.bot.calls[0][1])
         self.assertEqual(
             app.bot.calls[1][1].chat_id,
@@ -237,6 +255,29 @@ class TelegramBotTests(unittest.TestCase):
         self.assertEqual(parse_mode, "Markdown")
         self.assertIn("*Reminders (scheduled)*", text)
         self.assertIn("Call doctor", text)
+
+    def test_plan_command_starts_daily_planner_prompt(self):
+        module = load_module("tested_telegram_bot_plan", "telegram_bot/bot.py")
+        bot = module.TelegramBot.__new__(module.TelegramBot)
+        bot._daily_planner = FakeDailyPlanner()
+        update = FakeUpdate()
+
+        with patch.object(module, "record_activity") as activity:
+            asyncio.run(bot._cmd_plan(update, SimpleNamespace(args=[])))
+
+        self.assertEqual(bot._daily_planner.started, [True])
+        self.assertEqual(update.message.calls[0][0], "Planning prompt")
+        self.assertTrue(activity.called)
+
+    def test_plan_command_handles_missing_planner(self):
+        module = load_module("tested_telegram_bot_plan_missing", "telegram_bot/bot.py")
+        bot = module.TelegramBot.__new__(module.TelegramBot)
+        bot._daily_planner = None
+        update = FakeUpdate()
+
+        asyncio.run(bot._cmd_plan(update, SimpleNamespace(args=[])))
+
+        self.assertEqual(update.message.calls[0][0], "Daily planner not initialised.")
 
     def test_llmops_command_reports_usage_summary(self):
         module = load_module("tested_telegram_bot_llmops", "telegram_bot/bot.py")
@@ -434,6 +475,26 @@ class TelegramBotTests(unittest.TestCase):
         self.assertTrue(bot._chat_reset.started[0]["force_new"])
         self.assertEqual(len(bot._chat_reset.exchange_calls), 1)
         self.assertEqual(len(update.message.calls), 1)
+
+    def test_handle_message_routes_active_daily_planner_before_agent(self):
+        module = load_module("tested_telegram_bot_daily_planner", "telegram_bot/bot.py")
+        bot = module.TelegramBot.__new__(module.TelegramBot)
+        agent_calls = []
+        bot._agent = SimpleNamespace(
+            chat=lambda text, **_kwargs: agent_calls.append(text) or "Hello from Marvis",
+            history_is_empty=lambda: True,
+        )
+        bot._chat_reset = FakeChatResetManager()
+        bot._daily_planner = FakeDailyPlanner(handled=True)
+        update = FakeUpdate()
+        update.message.text = "Write proposal | high | 60m |"
+
+        with patch.object(module, "record_activity"), patch.object(module, "record_issue"):
+            asyncio.run(bot._handle_message(update, SimpleNamespace()))
+
+        self.assertEqual(bot._daily_planner.calls, ["Write proposal | high | 60m |"])
+        self.assertEqual(agent_calls, [])
+        self.assertEqual(update.message.calls[0][0], "Planner handled this.")
 
     def test_handle_message_sends_chat_reset_reminder_on_third_exchange(self):
         module = load_module("tested_telegram_bot_chat_reset_threshold", "telegram_bot/bot.py")

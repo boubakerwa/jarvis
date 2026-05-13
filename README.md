@@ -5,7 +5,7 @@
 <h1 align="center">Marvis</h1>
 
 <p align="center">
-  <strong>Marvelous Jarvis</strong> is a local AI assistant that talks over Telegram, watches Gmail, files documents into Google Drive, remembers useful context, schedules reminders, tracks work in GitHub, and stays inspectable through a local dashboard.
+  <strong>Marvelous Jarvis</strong> is a local AI assistant that talks over Telegram, plans the day, watches Gmail, files documents into Google Drive, remembers useful context, schedules reminders, tracks work in GitHub, and stays inspectable through a local dashboard.
 </p>
 
 <p align="center">
@@ -50,7 +50,7 @@ That gives you an assistant that can actually do useful local work:
 | GitHub workflow | creates trackable feature or bug issues and reads pull requests and commits from the configured repo |
 | Obsidian notes | writes collaborative Markdown notes into a shared vault with Marvis-chosen organization |
 | LinkedIn composer | queues drafts from Telegram, stores generation state locally, and exposes an editor/retry workflow in the dashboard |
-| Background schedulers | sends scheduled reminders, morning digests, and batched Gmail summaries over Telegram |
+| Background schedulers | sends scheduled reminders, daily planning prompts, morning digests, and batched Gmail summaries over Telegram |
 | Dashboard | shows overview, memory, Drive files, LinkedIn drafts, LLMOps telemetry, activity, and interactive docs |
 | Docs | ships with local architecture docs plus a Medium-ready article draft |
 
@@ -133,6 +133,7 @@ Interactive architecture docs live in [docs/index.html](./docs/index.html) and o
 
 - **Chat Agent** (`core/agent.py`) handles the Anthropic-format tool loop and assembles final replies.
 - **Reminder runner** (`reminders/service.py`) persists scheduled reminders and delivers them via Telegram in the background.
+- **Daily planner runner** (`daily_planner/service.py`) starts a Monday-Saturday Telegram planning workflow, builds a realistic plan, and schedules linked reminders.
 - **GitHub client** (`github_issues/client.py`) reads repository issues, pull requests, and commits and can create issues when configured.
 - **Notes Manager** (`notes/service.py`) creates, updates, and appends collaborative Markdown notes in the shared Obsidian vault.
 - **LLMOps recorder** (`core/llmops.py`) captures per-call latency, token usage, and estimated model cost in local JSONL.
@@ -166,6 +167,7 @@ This turned out to matter more than prompt polish. The biggest failures in agent
 | OpenRouter routing | Anthropic-compatible transport with Claude as the safe default and optional task-level overrides |
 | Persistent memory | SQLite for source of truth plus ChromaDB for semantic retrieval |
 | Proactive reminders | Schedules one-off or recurring Telegram reminders with cancellation and list support |
+| Daily planner | Prompts Monday-Saturday at 08:30, parses task urgency and estimates, asks for prioritization when the day is overfull, and schedules start reminders |
 | Gmail monitoring | Polls unread mail every 5 minutes and starts only after the configured cutoff date |
 | Morning digest | Sends a daily Telegram digest with open GitHub issues and a suggested focus item |
 | Smart filing | Classifies documents and uploads them into a structured Google Drive library |
@@ -220,6 +222,10 @@ JARVIS_GITHUB_REPOSITORY=owner/repo
 # JARVIS_GITHUB_TOKEN=ghp_xxx
 JARVIS_MORNING_DIGEST_ENABLED=true
 JARVIS_MORNING_TIME=09:00
+JARVIS_DAILY_PLANNER_ENABLED=true
+JARVIS_DAILY_PLANNER_TIME=08:30
+JARVIS_DAILY_PLANNER_END_TIME=18:00
+JARVIS_DAILY_PLANNER_BUFFER_MINUTES=10
 
 # Optional lower-risk Gemma routing:
 # OPENROUTER_MODEL_RELEVANCE=google/gemma-4-31b-it
@@ -256,6 +262,7 @@ Open [http://127.0.0.1:8080](http://127.0.0.1:8080).
 | `/llmops` | Shows recent token usage, estimated LLM cost, latency, top LLM tasks, and short-horizon ops health |
 | `/memories` | Lists stored memories grouped by category |
 | `/reminders [scheduled|cancelled|completed|all]` | Lists reminders currently stored in the local reminder scheduler |
+| `/plan` | Starts or resumes today's daily planning workflow manually |
 | `/forget <topic>` | Deletes a memory by topic |
 | `/reset` | Clears in-session chat history while preserving long-term memory |
 | `/linkedin ...` | Queues, lists, rewrites, or processes LinkedIn drafts from text or X/Twitter URLs |
@@ -383,6 +390,9 @@ jarvis/
 |- reminders/
 |  |- __init__.py
 |  `- service.py
+|- daily_planner/
+|  |- __init__.py
+|  `- service.py
 |- memory/
 |  |- manager.py
 |  `- schema.py
@@ -435,6 +445,7 @@ The branch includes automated coverage for:
 - Gmail watcher cutoff behavior
 - note workspace creation, append, and search behavior
 - reminder scheduling and delivery flows
+- daily planning prompts, fit calculation, prioritization, and Telegram routing
 - GitHub issue / PR / commit integration
 - read-only source and log introspection tools
 - LLMOps telemetry summaries and ops audit logging

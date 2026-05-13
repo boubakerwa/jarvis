@@ -143,6 +143,7 @@ class TelegramBot:
         chat_reset_manager=None,
         linkedin_drive=None,
         gmail_action_manager=None,
+        daily_planner_manager=None,
     ):
         self._agent = agent
         self._memory = memory_manager
@@ -152,6 +153,7 @@ class TelegramBot:
         self._reminders = reminder_manager
         self._chat_reset = chat_reset_manager
         self._gmail_actions = gmail_action_manager
+        self._daily_planner = daily_planner_manager
         self._background_tasks: set[asyncio.Task] = set()
         self._app = (
             Application.builder()
@@ -180,6 +182,7 @@ class TelegramBot:
         self._app.add_handler(CommandHandler("status", self._cmd_status, filters=allow))
         self._app.add_handler(CommandHandler("llmops", self._cmd_llmops, filters=allow))
         self._app.add_handler(CommandHandler("linkedin", self._cmd_linkedin, filters=allow))
+        self._app.add_handler(CommandHandler("plan", self._cmd_plan, filters=allow))
         self._app.add_handler(CallbackQueryHandler(self._handle_callback_query, pattern=r"^(reminder|chatreset|gmailaction):"))
 
         # File/photo uploads
@@ -204,6 +207,7 @@ class TelegramBot:
             BotCommand("forget", "Delete a memory by topic"),
             BotCommand("reset", "Clear chat history"),
             BotCommand("linkedin", "Draft a LinkedIn post from text or URL"),
+            BotCommand("plan", "Start today's planning workflow"),
         ]
 
     async def _publish_bot_commands(self, application: Application) -> None:
@@ -279,6 +283,27 @@ class TelegramBot:
         text = "\n".join(lines)
         for chunk in _split_message(text, 4096):
             await update.message.reply_text(chunk, parse_mode="Markdown")
+
+    async def _cmd_plan(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._daily_planner:
+            await update.message.reply_text("Daily planner not initialised.")
+            return
+
+        session = self._daily_planner.start_today_session()
+        if session is None:
+            await update.message.reply_text("Daily planning is already scheduled for today, or today is not a planning day.")
+            return
+
+        prompt = self._daily_planner.build_prompt()
+        for chunk in _split_message(prompt, 4096):
+            await update.message.reply_text(chunk)
+
+        record_activity(
+            event="daily_planner_manual_prompt_sent",
+            component="daily_planner",
+            summary="Manual daily planning prompt sent via Telegram command",
+            metadata={"session_id": session["id"]},
+        )
 
     async def _cmd_forget(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         topic = " ".join(context.args) if context.args else ""
@@ -612,6 +637,31 @@ class TelegramBot:
 
     async def _handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_text = update.message.text
+        if getattr(self, "_daily_planner", None):
+            try:
+                planner_result = self._daily_planner.handle_user_message(user_text)
+            except Exception as exc:
+                logger.exception("Daily planner message handling failed")
+                record_issue(
+                    level="ERROR",
+                    event="daily_planner_message_failed",
+                    component="daily_planner",
+                    status="error",
+                    summary="Daily planner failed while handling Telegram reply",
+                    metadata={"error": str(exc)},
+                )
+                planner_result = None
+            if planner_result and planner_result.handled:
+                for chunk in _split_message(planner_result.text, 4096):
+                    await update.message.reply_text(chunk)
+                record_activity(
+                    event="daily_planner_message_handled",
+                    component="daily_planner",
+                    summary="Handled Telegram message as daily planner input",
+                    metadata={"chunk_count": len(_split_message(planner_result.text, 4096))},
+                )
+                return
+
         was_history_empty = self._agent.history_is_empty() if hasattr(self._agent, "history_is_empty") else False
         logger.info("Received message from %s", update.effective_user.id)
         op_id = new_op_id("telegram-message")

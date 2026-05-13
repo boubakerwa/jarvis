@@ -530,6 +530,18 @@ def main():
         summary="Gmail action proposal manager initialised",
     )
 
+    from daily_planner import DailyPlannerManager
+    daily_planner_manager = DailyPlannerManager(
+        memory_manager=memory_manager,
+        reminder_manager=reminder_manager,
+        calendar_client=calendar_client,
+    )
+    record_audit(
+        event="daily_planner_ready",
+        component="daily_planner",
+        summary="Daily planner manager initialised",
+    )
+
     heartbeat_thread = threading.Thread(target=_heartbeat_loop, daemon=True, name="ops-heartbeat")
     heartbeat_thread.start()
     record_activity(event="app_heartbeat_started", component="runtime", summary="Heartbeat thread started")
@@ -544,6 +556,7 @@ def main():
         reminder_manager=reminder_manager,
         chat_reset_manager=chat_reset_manager,
         gmail_action_manager=gmail_action_manager,
+        daily_planner_manager=daily_planner_manager,
     )
     proactive_notifier = TelegramProactiveNotifier(
         enabled=True,
@@ -612,6 +625,25 @@ def main():
         )
     else:
         logger.info("Morning digest disabled (set JARVIS_MORNING_DIGEST_ENABLED=true to enable)")
+
+    # Daily planner (Mon-Sat scheduled planning prompt)
+    if settings.JARVIS_DAILY_PLANNER_ENABLED:
+        from daily_planner import DailyPlannerRunner
+        daily_planner_runner = DailyPlannerRunner(
+            manager=daily_planner_manager,
+            notifier=proactive_notifier,
+        )
+        daily_planner_thread = threading.Thread(
+            target=daily_planner_runner.run_forever, daemon=True, name="daily-planner"
+        )
+        daily_planner_thread.start()
+        record_activity(
+            event="daily_planner_started",
+            component="daily_planner",
+            summary=f"Daily planner scheduled for {settings.JARVIS_DAILY_PLANNER_TIME} local time",
+        )
+    else:
+        logger.info("Daily planner disabled (set JARVIS_DAILY_PLANNER_ENABLED=true to enable)")
 
     # Gmail watcher (background thread)
     from gmail.watcher import GmailWatcher
